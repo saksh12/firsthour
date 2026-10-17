@@ -23,6 +23,7 @@ from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import make_command, verify_event
+from .triage import StepFun
 from .unlock import UnlockGuard
 
 log = logging.getLogger("firsthour.api")
@@ -49,6 +50,10 @@ def load_settings() -> dict:
         "INCIDENT_WINDOW_SECONDS": int(os.getenv("INCIDENT_WINDOW_SECONDS", "600")),
         "UNLOCK_HOLD_SECONDS": int(os.getenv("UNLOCK_HOLD_SECONDS", "30")),
         "CORS_ORIGINS": os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS),
+        "STUB_STEPFUN": os.getenv("STUB_STEPFUN", "1") == "1",
+        "STEPFUN_API_KEY": os.getenv("STEPFUN_API_KEY", ""),
+        "STEPFUN_BASE_URL": os.getenv("STEPFUN_BASE_URL", ""),
+        "STEPFUN_MODEL": os.getenv("STEPFUN_MODEL", "step-5-preview"),
     }
 
 
@@ -137,8 +142,15 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     guard = UnlockGuard(allowed=s["CAREGIVER_NUMBERS"], window_s=s["INCIDENT_WINDOW_SECONDS"],
                         on_grant=queue_unlock)
+    stepfun = StepFun(
+        api_key=s.get("STEPFUN_API_KEY", ""), base_url=s.get("STEPFUN_BASE_URL", ""),
+        model=s.get("STEPFUN_MODEL", "step-5-preview"), stub=s.get("STUB_STEPFUN", True),
+        **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
+    )
+    log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
-                              emit=emit, speak=speak, send_alert=send_alert, on_close=close_on_pi)
+                              emit=emit, speak=speak, send_alert=send_alert, on_close=close_on_pi,
+                              triage_fn=stepfun.triage, rewrite_fn=stepfun.rewrite)
 
     @asynccontextmanager
     async def lifespan(_app):
