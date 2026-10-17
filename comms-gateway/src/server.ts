@@ -1,25 +1,18 @@
 /**
- * HTTP surface of the gateway (Role C).
+ * HTTP surface of the gateway (Role C). Listens on localhost only: the backend
+ * on the same laptop is its only client.
  *
  *   GET  /health   -> { ok, stub }
- *   POST /send      { to, body, spaceId?, senderId?, parentMessageId? }
- *                   -> sends via Photon (or stub outbox)
- *   POST /inbound    a Photon received-message (webhook), or { from, body }
- *                   -> forwards to the backend's POST /comms/inbound
+ *   POST /send      { to, body } -> sends via Photon (or the stub outbox)
  *
- * In the real path a background poller also pulls received iMessages and
- * forwards caregiver replies, so no public webhook is strictly required.
+ * Inbound: a background poller pulls received iMessages and forwards caregiver
+ * replies to the backend's POST /comms/inbound, so no public webhook is needed.
  */
 
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Config } from "./config.js";
-import {
-  isCaregiverReply,
-  toBackendInbound,
-  type InboundForward,
-  type ReceivedMessage,
-} from "./messages.js";
-import type { PhotonGateway } from "./photon.js";
+import { conversationOf, isCaregiverReply, toBackendInbound, type InboundForward } from "./messages.js";
+import { NoConversationError, type PhotonGateway } from "./photon.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -29,19 +22,15 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 function send(res: ServerResponse, status: number, payload: unknown): void {
-  const body = JSON.stringify(payload);
   res.writeHead(status, { "content-type": "application/json" });
-  res.end(body);
+  res.end(JSON.stringify(payload));
 }
 
 /** Forward one caregiver reply to the backend. Returns the backend's JSON. */
-export async function forwardInbound(
-  backendUrl: string,
-  payload: InboundForward | { from: string; body: string },
-): Promise<unknown> {
-  const resp = await fetch(`${backendUrl.replace(/\/$/, "")}/comms/inbound`, {
+export async function forwardInbound(cfg: Config, payload: InboundForward): Promise<unknown> {
+  const resp = await fetch(`${cfg.backendUrl.replace(/\/$/, "")}/comms/inbound`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.backendToken}` },
     body: JSON.stringify(payload),
   });
   if (!resp.ok) throw new Error(`backend /comms/inbound -> ${resp.status}`);
@@ -51,51 +40,20 @@ export async function forwardInbound(
 export function createServer(cfg: Config, gateway: PhotonGateway) {
   return createHttpServer(async (req, res) => {
     try {
-      const url = req.url ?? "/";
-      if (req.method === "GET" && url === "/health") {
+      if (req.method === "GET" && req.url === "/health") {
         return send(res, 200, { ok: true, stub: cfg.stubPhoton });
       }
-
-      if (req.method === "POST" && url === "/send") {
-        const b = (await readJson(req)) as {
-          to?: string;
-          body?: string;
-          spaceId?: string;
-          senderId?: string;
-          parentMessageId?: string;
-        };
-        if (!b.to || !b.body) return send(res, 400, { error: "to and body are required" });
-        const result = await gateway.send({
-          to: b.to,
-          body: b.body,
-          spaceId: b.spaceId,
-          senderId: b.senderId,
-          parentMessageId: b.parentMessageId,
-        });
-        return send(res, 200, result);
-      }
-
-      if (req.method === "POST" && url === "/inbound") {
-        const b = (await readJson(req)) as Partial<ReceivedMessage> & {
-          from?: string;
-          body?: string;
-        };
-        // Either a raw Photon received-message, or a simple {from, body}.
-        let payload: InboundForward | { from: string; body: string };
-        if (b.id && b.sentBy && b.space) {
-          payload = toBackendInbound(b as ReceivedMessage);
-        } else if (b.from && typeof b.body === "string") {
-          payload = { from: b.from, body: b.body };
-        } else {
-          return send(res, 400, { error: "expected a Photon message or { from, body }" });
+      if (req.method === "POST" && req.url === "/send") {
+        const b = (await readJson(req)) as { to?: unknown; body?: unknown };
+        if (typeof b.to !== "string" || typeof b.body !== "string" || !b.to || !b.body) {
+          return send(res, 400, { error: "to and body are required strings" });
         }
-        const backendReply = await forwardInbound(cfg.backendUrl, payload);
-        return send(res, 200, { forwarded: true, backend: backendReply });
+        return send(res, 200, await gateway.send(b.to, b.body));
       }
-
       return send(res, 404, { error: "not found" });
     } catch (err) {
-      return send(res, 500, { error: err instanceof Error ? err.message : "gateway error" });
+      const status = err instanceof NoConversationError ? 409 : 500;
+      return send(res, status, { error: err instanceof Error ? err.message : "gateway error" });
     }
   });
 }
@@ -104,11 +62,7 @@ export function createServer(cfg: Config, gateway: PhotonGateway) {
  * Background inbound poller (real path only). Polls Photon for received
  * iMessages and forwards caregiver replies to the backend. Returns a stop fn.
  */
-export function startInboundPoller(
-  cfg: Config,
-  gateway: PhotonGateway,
-  intervalMs = 2000,
-): () => void {
+export function startInboundPoller(cfg: Config, gateway: PhotonGateway, intervalMs = 2000): () => void {
   let stopped = false;
   let since = new Date(Date.now() - 5000).toISOString();
   const seen = new Set<string>();
@@ -116,12 +70,12 @@ export function startInboundPoller(
   const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
-      const msgs = await gateway.listReceivedSince(since);
-      for (const m of msgs) {
+      for (const m of await gateway.listReceivedSince(since)) {
         if (seen.has(m.id)) continue;
         seen.add(m.id);
         if (isCaregiverReply(m, cfg.photon.agentHandle)) {
-          await forwardInbound(cfg.backendUrl, toBackendInbound(m));
+          gateway.remember(m.sentBy.handle, conversationOf(m));
+          await forwardInbound(cfg, toBackendInbound(m));
         }
         if (m.createdAt > since) since = m.createdAt;
       }

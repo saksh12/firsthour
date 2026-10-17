@@ -155,6 +155,35 @@ def test_stub_outbox_is_gone_when_photon_is_real():
     assert c.get("/comms/stub/outbox").status_code == 404
 
 
+def test_real_photon_inbound_only_trusts_the_gateway():
+    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    msg = {"sender": CAREGIVER, "text": "on my way"}
+    assert c.post("/comms/inbound", json=msg).status_code == 401
+    assert c.post("/comms/inbound", json=msg, headers={"Authorization": "Bearer nope"}).status_code == 401
+    ok = c.post("/comms/inbound", json=msg, headers={"Authorization": f"Bearer {SECRET}"})
+    assert ok.status_code == 200 and ok.json()["reason"] == "no active incident"
+
+
+def test_real_photon_alert_goes_to_the_gateway(monkeypatch):
+    import threading
+
+    sent, done = [], threading.Event()
+
+    def fake_transport(url, headers, body, timeout):
+        sent.append((url, body))
+        done.set()
+        return {"id": "msg_1", "stubbed": False}
+
+    monkeypatch.setattr("app.main.urllib_transport", fake_transport)
+    c = TestClient(create_app(settings(STUB_PHOTON=False, COMMS_GATEWAY_URL="http://gw:8787/")))
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    assert done.wait(2)
+    url, body = sent[0]
+    assert url == "http://gw:8787/send" and body["to"] == CAREGIVER
+    assert re.search(r"Reply UNLOCK \d{4}", body["body"])
+
+
 def test_help_button_escalates(client):
     post_event(client)
     post_event(client, "help_button", ts=TS + 500)

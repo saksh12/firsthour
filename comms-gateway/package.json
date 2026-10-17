@@ -2,11 +2,12 @@
   "name": "comms-gateway",
   "version": "0.1.0",
   "private": true,
+  "engines": { "node": ">=22" },
   "type": "module",
   "description": "FirstHour Photon gateway (Role C): caregiver alert text out, reply in.",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx watch --env-file-if-exists=../.env src/index.ts",
+    "start": "node --env-file-if-exists=../.env dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
