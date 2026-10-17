@@ -1,0 +1,5 @@
+# FirstHour backend deps. Grow this file as roles need more; keep it minimal.
+# Added by Role C (comms stub slice): only what comms.py/voice.py tests need.
+pytest>=8.0
+httpx>=0.27          # comms.py -> comms-gateway on the real (STUB_PHOTON=0) path
+# elevenlabs       # uncomment when STUB_ELEVENLABS=0 (Phase 3 voice work)
