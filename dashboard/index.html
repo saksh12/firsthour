@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FirstHour Dashboard</title>
+<!--
+  Live incident view (IMPLEMENTATION.md sections 6.7, 7 Phase 1 step 8).
+  Plain HTML, no build step. Reads everything from the backend's /ws/dashboard.
+  Open the file directly, or: python3 -m http.server 5173 -d dashboard
+  Point at another backend with ?backend=http://<laptop-ip>:8000
+  The unlock code is never sent here, by design.
+-->
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e1e5ea; --text: #14181d; --dim: #5d6876;
+  --idle: #5d6876;   --idle-bg: #eef1f4;
+  --check: #9a5b00;  --check-bg: #fff3dc;
+  --alert: #b3261e;  --alert-bg: #fde7e5;
+  --resp: #1f5fbf;   --resp-bg: #e3edfc;
+  --open: #11713f;   --open-bg: #dff3e7;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --panel: #161b22; --line: #2a313c; --text: #e8edf2; --dim: #98a3b1;
+    --idle: #a7b0bc;  --idle-bg: #1f252e;
+    --check: #f2b75b; --check-bg: #33270f;
+    --alert: #ff7b72; --alert-bg: #3b1715;
+    --resp: #79b0ff;  --resp-bg: #142540;
+    --open: #56d38a;  --open-bg: #0f2e1d;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --panel: #161b22; --line: #2a313c; --text: #e8edf2; --dim: #98a3b1;
+  --idle: #a7b0bc;  --idle-bg: #1f252e;
+  --check: #f2b75b; --check-bg: #33270f;
+  --alert: #ff7b72; --alert-bg: #3b1715;
+  --resp: #79b0ff;  --resp-bg: #142540;
+  --open: #56d38a;  --open-bg: #0f2e1d;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+.brand span { color: var(--dim); font-size: 14px; }
+.conn { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; background: var(--panel); }
+.conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--alert); display: inline-block; }
+.conn.live i { background: var(--open); }
+
+.hero { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-bottom: 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px; min-width: 0; }
+.status { border-width: 2px; transition: background .2s, border-color .2s; }
+.label { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 10px; }
+.state-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.badge { font-size: 13px; font-weight: 700; letter-spacing: .06em; padding: 4px 10px; border-radius: 8px; }
+.headline { font-size: 30px; font-weight: 700; line-height: 1.15; margin: 10px 0 4px; letter-spacing: -0.02em; }
+.reason { color: var(--dim); font-size: 15px; min-height: 22px; }
+.clock-label { margin-top: 18px; }
+.clock { font-family: var(--mono); font-size: 84px; font-weight: 700; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.asking { margin-top: 16px; padding: 12px 14px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); font-size: 17px; min-height: 50px; }
+.asking b { display: block; font-size: 12px; color: var(--dim); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 2px; }
+
+.door { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; }
+.door svg { width: 92px; height: 92px; }
+.door .door-state { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+.door .door-note { color: var(--dim); font-size: 14px; min-height: 21px; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.triage-rows { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; align-items: center; margin: 0; }
+.triage-rows dt { color: var(--dim); font-size: 15px; }
+.triage-rows dd { margin: 0; font-weight: 600; font-size: 17px; }
+.v-yes { color: var(--alert); } .v-no { color: var(--open); } .v-unk { color: var(--dim); font-weight: 500; }
+.v-plain { color: var(--text); }
+.summary { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 15px; }
+.source { color: var(--dim); font-size: 12px; margin-top: 8px; }
+
+.qa { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.qa li { border-left: 3px solid var(--line); padding-left: 12px; }
+.qa .q { color: var(--dim); font-size: 14px; }
+.qa .a { font-size: 17px; }
+.qa li.pending .a { color: var(--dim); font-style: italic; }
+.empty { color: var(--dim); font-size: 15px; }
+
+.attempts, .log { list-style: none; margin: 0; padding: 0; }
+.attempts li { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 15px; flex-wrap: wrap; }
+.attempts li:last-child { border-bottom: 0; }
+.pill { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px; letter-spacing: .04em; }
+.pill.ok { color: var(--open); background: var(--open-bg); }
+.pill.no { color: var(--alert); background: var(--alert-bg); }
+.mono { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+.log { max-height: 320px; overflow: auto; font-size: 14px; }
+.log li { display: grid; grid-template-columns: 74px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.log li:last-child { border-bottom: 0; }
+.log time { font-family: var(--mono); font-size: 12px; color: var(--dim); padding-top: 2px; }
+
+form.answer { display: flex; gap: 8px; margin-top: 4px; }
+input, button { font: inherit; font-size: 15px; border-radius: 10px; }
+input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+button { padding: 10px 14px; border: 1px solid transparent; background: var(--text); color: var(--panel); font-weight: 600; cursor: pointer; white-space: nowrap; }
+button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+button:disabled { opacity: .5; cursor: default; }
+.op-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.op-msg { font-size: 13px; color: var(--dim); min-height: 20px; margin-top: 8px; }
+.op-msg.err { color: var(--alert); }
+.full { grid-column: 1 / -1; }
+
+@media (max-width: 820px) {
+  .wrap { padding: 16px 16px 40px; }
+  .hero, .grid { grid-template-columns: 1fr; }
+  .clock { font-size: 64px; }
+  .headline { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><h1>FirstHour</h1><span id="where">Margaret · Bathroom</span></div>
+    <span class="conn" id="conn"><i></i><span id="conn-text">Connecting…</span></span>
+  </header>
+
+  <section class="hero">
+    <div class="panel status" id="status-panel">
+      <p class="label">Status</p>
+      <div class="state-row"><span class="badge" id="badge">IDLE</span><span class="mono" id="incident-id"></span></div>
+      <div class="headline" id="headline">All clear</div>
+      <div class="reason" id="reason"></div>
+      <p class="label clock-label">Time down</p>
+      <div class="clock" id="clock">--:--</div>
+      <div class="asking" id="asking-box"><b>Asking now</b><span id="asking">Nothing</span></div>
+    </div>
+
+    <div class="panel door" id="door-panel" aria-live="polite">
+      <p class="label">Front door</p>
+      <svg viewBox="0 0 96 96" aria-hidden="true" id="door-icon">
+        <rect x="22" y="44" width="52" height="40" rx="8" fill="none" stroke="currentColor" stroke-width="6"/>
+        <path id="shackle" d="M34 44 V30 a14 14 0 0 1 28 0 V44" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+        <circle cx="48" cy="62" r="5" fill="currentColor"/>
+      </svg>
+      <div class="door-state" id="door-state">Locked</div>
+      <div class="door-note" id="door-note">Opens only for an enrolled caregiver with the one-time code.</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel">
+      <p class="label">Triage</p>
+      <dl class="triage-rows" id="triage"></dl>
+      <div class="summary" id="summary"></div>
+      <div class="source">Structured from her own words. Blood thinner comes from her profile, not the AI.</div>
+    </div>
+
+    <div class="panel">
+      <p class="label">What she said</p>
+      <ul class="qa" id="qa"></ul>
+    </div>
+
+    <div class="panel">
+      <p class="label">Unlock attempts</p>
+      <ul class="attempts" id="attempts"><li class="empty">None yet.</li></ul>
+    </div>
+
+    <div class="panel">
+      <p class="label">Operator</p>
+      <form class="answer" id="answer-form" autocomplete="off">
+        <label for="answer" class="label" style="position:absolute;left:-9999px">Typed answer</label>
+        <input id="answer" placeholder="Type what she said (speech fallback)">
+        <button type="submit">Send</button>
+      </form>
+      <div class="op-row">
+        <button class="ghost" id="resolve" type="button">Mark resolved</button>
+        <span class="mono" id="backend-url"></span>
+      </div>
+      <div class="op-msg" id="op-msg"></div>
+    </div>
+
+    <div class="panel full">
+      <p class="label">Event log</p>
+      <ul class="log" id="log"></ul>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  // Fixed question script, same as backend/app/triage.py (section 11.2).
+  const QUESTIONS = [
+    "Are you okay? Say 'I'm fine' or 'I need help.'",
+    "Did you hit your head?",
+    "Where does it hurt?",
+    "Can you move your legs?",
+    "Are you bleeding anywhere?",
+  ];
+  const STATES = {
+    IDLE:       { tone: "idle",  head: "All clear" },
+    CHECKING:   { tone: "check", head: "Checking on Margaret" },
+    ALERTING:   { tone: "alert", head: "Help needed — caregiver alerted" },
+    RESPONDING: { tone: "resp",  head: "Caregiver is responding" },
+    UNLOCKED:   { tone: "open",  head: "Door unlocked for help" },
+    CANCELLED:  { tone: "idle",  head: "She said she's fine" },
+    RESOLVED:   { tone: "idle",  head: "Resolved" },
+  };
+  const LOCAL_UNLOCK_HOLD_MS = 30000;
+
+  const params = new URLSearchParams(location.search);
+  const backend = (params.get("backend") || "http://localhost:8000").replace(/\/$/, "");
+  const wsUrl = backend.replace(/^http/, "ws") + "/ws/dashboard";
+  const $ = (id) => document.getElementById(id);
+
+  let view = blank();
+  let localUnlockUntil = 0;
+
+  function blank() {
+    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], triage: null };
+  }
+
+  // --- rendering -----------------------------------------------------------
+
+  function tone(name) {
+    return { color: `var(--${name})`, bg: `var(--${name}-bg)` };
+  }
+
+  function renderStatus() {
+    const s = STATES[view.state] || STATES.IDLE;
+    const t = tone(s.tone);
+    const badge = $("badge");
+    badge.textContent = view.state;
+    badge.style.color = t.color; badge.style.background = t.bg;
+    $("status-panel").style.borderColor = view.state === "IDLE" ? "var(--line)" : t.color;
+    $("headline").textContent = s.head;
+    $("reason").textContent = view.reason ? reasonText(view.reason) : "";
+    $("incident-id").textContent = view.incidentId || "";
+    const next = view.incidentId ? QUESTIONS[view.answers.length] : null;
+    $("asking").textContent = next || (view.incidentId ? "Script finished" : "Nothing");
+  }
+
+  function reasonText(r) {
+    const map = {
+      "fall_suspected": "Sound and floor vibration agreed.",
+      "person needs help": "She asked for help.",
+      "no clear answer": "Her answer wasn't a clear \"I'm fine\".",
+      "help button": "Help button pressed.",
+      "caregiver replied": "Caregiver replied.",
+      "unlock granted": "Enrolled caregiver sent the right code.",
+      "unlock hold ended": "Door relocked.",
+      "person said fine": "She said she's fine.",
+    };
+    return map[r] || r.charAt(0).toUpperCase() + r.slice(1) + ".";
+  }
+
+  function renderClock() {
+    const el = $("clock");
+    if (!view.openedAt) { el.textContent = "--:--"; el.style.color = "var(--dim)"; return; }
+    const s = Math.max(0, Math.floor((Date.now() - view.openedAt) / 1000));
+    el.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+    el.style.color = tone((STATES[view.state] || STATES.IDLE).tone).color;
+  }
+
+  function renderDoor() {
+    const remote = view.state === "UNLOCKED";
+    const local = Date.now() < localUnlockUntil;
+    const open = remote || local;
+    const t = tone(open ? "open" : "idle");
+    $("door-panel").style.color = t.color;
+    $("door-state").textContent = open ? "Unlocked" : "Locked";
+    $("door-note").textContent = open
+      ? (remote ? "Unlocked by the caregiver. Relocks automatically." : "Unlocked on the device by an enrolled NFC tag.")
+      : "Opens only for an enrolled caregiver with the one-time code.";
+    $("shackle").setAttribute("d", open ? "M34 44 V30 a14 14 0 0 1 28 0 V22" : "M34 44 V30 a14 14 0 0 1 28 0 V44");
+  }
+
+  function yn(v, yesWord, noWord) {
+    if (v === true) return [yesWord, "v-yes"];
+    if (v === false) return [noWord, "v-no"];
+    return ["Not said", "v-unk"];
+  }
+
+  function renderTriage() {
+    const t = view.triage || {};
+    const rows = [
+      ["Responding", t.conscious === true ? ["Yes, talking", "v-no"] : ["Not yet", "v-unk"]],
+      ["Hit head", yn(t.head_strike, "Yes", "No")],
+      ["Pain", t.pain_location ? [t.pain_location, "v-plain"] : ["Not said", "v-unk"]],
+      ["Can move legs", t.can_move === true ? ["Yes", "v-no"] : t.can_move === false ? ["No", "v-yes"] : ["Not said", "v-unk"]],
+      ["Bleeding", yn(t.bleeding, "Yes", "No")],
+      ["Blood thinner", t.on_blood_thinner === true ? ["Yes (profile)", "v-yes"] : t.on_blood_thinner === false ? ["No (profile)", "v-no"] : ["—", "v-unk"]],
+    ];
+    const dl = $("triage");
+    dl.replaceChildren();
+    for (const [k, [v, cls]] of rows) {
+      const dt = document.createElement("dt"); dt.textContent = k;
+      const dd = document.createElement("dd"); dd.textContent = v; dd.className = cls;
+      dl.append(dt, dd);
+    }
+    $("summary").textContent = view.incidentId ? (t.summary || "Waiting for her answer.") : "No incident.";
+  }
+
+  function renderQA() {
+    const ul = $("qa");
+    ul.replaceChildren();
+    if (!view.incidentId) {
+      const li = document.createElement("li"); li.className = "empty"; li.textContent = "No incident.";
+      ul.append(li); return;
+    }
+    const n = Math.min(QUESTIONS.length, view.answers.length + 1);
+    for (let i = 0; i < n; i++) {
+      const li = document.createElement("li");
+      const q = document.createElement("div"); q.className = "q"; q.textContent = QUESTIONS[i];
+      const a = document.createElement("div"); a.className = "a";
+      if (i < view.answers.length) a.textContent = "“" + view.answers[i] + "”";
+      else { li.className = "pending"; a.textContent = "Waiting…"; }
+      li.append(q, a); ul.append(li);
+    }
+  }
+
+  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); }
+
+  function addAttempt(d) {
+    const ul = $("attempts");
+    if (ul.firstElementChild && ul.firstElementChild.classList.contains("empty")) ul.replaceChildren();
+    const li = document.createElement("li");
+    const pill = document.createElement("span");
+    pill.className = "pill " + (d.allowed ? "ok" : "no");
+    pill.textContent = d.allowed ? "OPENED" : "REFUSED";
+    const who = document.createElement("span"); who.className = "mono"; who.textContent = d.sender || "unknown";
+    const why = document.createElement("span"); why.textContent = d.allowed ? "enrolled number, right code" : d.reason;
+    li.append(pill, who, why);
+    ul.prepend(li);
+  }
+
+  function log(text) {
+    const li = document.createElement("li");
+    const t = document.createElement("time"); t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+    const s = document.createElement("span"); s.textContent = text;
+    li.append(t, s);
+    $("log").prepend(li);
+    while ($("log").children.length > 200) $("log").lastElementChild.remove();
+  }
+
+  // --- events (section 6.7) --------------------------------------------------
+
+  function openedAtFromId(id) {
+    // Edge incident ids end in the epoch ms when the Pi opened them: "<device>-<ms>".
+    const m = /-(\d{13})$/.exec(id || "");
+    return m ? Number(m[1]) : null;
+  }
+
+  function onSnapshot(d) {
+    view = blank();
+    view.state = d.state;
+    view.incidentId = d.incident_id;
+    if (d.incident_id) {
+      view.openedAt = d.opened_at_ms || openedAtFromId(d.incident_id) || Date.now();
+      view.answers = (d.transcript || []).map((x) => x.a);
+      view.triage = d.triage || null;
+    }
+    log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
+  }
+
+  function onEvent(type, d) {
+    switch (type) {
+      case "incident_update":
+        if (d.snapshot) { onSnapshot(d); break; }
+        if (d.state === "IDLE") {
+          view = blank();
+          log("Back to IDLE");
+          break;
+        }
+        if (d.incident_id && d.incident_id !== view.incidentId) {
+          view = blank();
+          view.incidentId = d.incident_id;
+          view.openedAt = openedAtFromId(d.incident_id) || Date.now();
+        }
+        view.state = d.state; view.reason = d.reason || "";
+        log(`${d.prev || ""}${d.prev ? " → " : ""}${d.state}${d.reason ? " · " + d.reason : ""}`);
+        break;
+      case "triage_update":
+        view.triage = d.triage;
+        view.answers = d.transcript || [];
+        log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
+        break;
+      case "message_out":
+        log("Alert sent to " + (d.to || []).join(", "));
+        break;
+      case "message_in":
+        log("Caregiver " + d.sender + ": “" + d.text + "” (read aloud)");
+        break;
+      case "unlock_attempt":
+        addAttempt(d);
+        log((d.allowed ? "Unlock granted for " : "Unlock refused for ") + d.sender + (d.allowed ? "" : " · " + d.reason));
+        break;
+      case "device_status":
+        if (d.event === "local_unlock") localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS;
+        log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
+        break;
+    }
+    render();
+  }
+
+  // --- WebSocket with reconnect ------------------------------------------------
+
+  let retry = 500;
+  function connect() {
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      retry = 500;
+      $("conn").classList.add("live");
+      $("conn-text").textContent = "Live";
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        onEvent(m.type, m.data || {});
+      } catch (e) { console.warn("bad event", e); }
+    };
+    ws.onclose = () => {
+      $("conn").classList.remove("live");
+      $("conn-text").textContent = "Reconnecting…";
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 5000);
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  // --- operator actions ------------------------------------------------------
+
+  async function post(path, body) {
+    const msg = $("op-msg");
+    msg.className = "op-msg"; msg.textContent = "Sending…";
+    try {
+      const r = await fetch(backend + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!r.ok) throw new Error("backend said " + r.status);
+      msg.textContent = "Sent.";
+      return true;
+    } catch (e) {
+      msg.className = "op-msg err";
+      msg.textContent = "Couldn't reach the backend (" + e.message + "). If the page is on another origin, the backend needs CORS enabled.";
+      return false;
+    }
+  }
+
+  $("answer-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("answer");
+    const text = input.value.trim();
+    if (!text) return;
+    if (await post("/person/answer", { text })) input.value = "";
+  });
+  $("resolve").addEventListener("click", () => post("/incident/resolve"));
+  $("backend-url").textContent = backend;
+
+  render();
+  setInterval(() => { renderClock(); renderDoor(); }, 250);
+  connect();
+})();
+</script>
+</body>
+</html>
