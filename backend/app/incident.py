@@ -51,6 +51,7 @@ class IncidentMachine:
         emit: Emit = _noop,
         speak: Callable[[str], None] = _noop,
         send_alert: Callable[[str, str], None] = _noop,
+        on_close: Callable[[Incident, S], None] = _noop,
     ):
         self.guard = guard
         self.profile = profile
@@ -60,6 +61,7 @@ class IncidentMachine:
         self._emit = emit
         self._speak = speak
         self._send_alert = send_alert
+        self._on_close = on_close
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
 
@@ -204,6 +206,9 @@ class IncidentMachine:
     def _finish(self, final: S, reason: str) -> None:
         self._set(final, reason)
         self.guard.close_incident()
+        # Tell the Pi before forgetting the incident, so its buzzer, clock and
+        # offline NFC unlock don't stay live until the local window runs out.
+        self._on_close(self.incident, final)
         self.incident = None
         self._emit("incident_update", {"state": S.IDLE.value, "incident_id": None, "reason": "reset"})
         log.info("state -> IDLE")
