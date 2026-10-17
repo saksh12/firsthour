@@ -15,8 +15,8 @@ server.listen(cfg.port, () => {
 
   if (!cfg.sharedSecret) {
     console.error(
-      "SHARED_SECRET is not set; the backend rejects signed inbound forwards with 401 " +
-        "when STUB_PHOTON=0. Fill it in .env.",
+      "SHARED_SECRET is not set; inbound forwards go out unsigned and the backend " +
+        "only accepts them while its STUB_PHOTON=1. Set it in .env for the live path.",
     );
   }
   if (!cfg.stubPhoton) {

@@ -321,7 +321,9 @@ X-Timestamp: <epoch ms>
 X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))
 ```
 
-A missing, bad, or stale (over 30 s old) signature is refused with 401. Only while `STUB_PHOTON=1` are **unsigned** requests allowed, so the dashboard and caregiver-simulator pages keep working; a signature that is present is always verified. The gateway signs with `SHARED_SECRET` from the root `.env`.
+A missing, bad, or stale (over 30 s old) signature is refused with 401, a malformed body with 422. Only while `STUB_PHOTON=1` are **unsigned** requests allowed, so the dashboard and caregiver-simulator pages keep working; a signature that is present is always verified. The gateway signs with `SHARED_SECRET` from the root `.env` (unset = forwards go unsigned).
+
+The signature covers the whole body, so a captured reply can be resent inside the window. The backend remembers accepted signatures (and the gateway's `messageId`, which also catches a re-signed copy of the same Photon message) for the freshness window and refuses repeats with 409 `replay`; unsigned stub-mode requests are not deduped.
 
 ### 6.7 Dashboard live events (WebSocket from backend)
 

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { signBody, signHeaders } from "./sign.js";
+import { forwardInbound } from "./server.js";
 
 // Pinned against backend/app/security.py: sign_event(secret, ts, raw) =
 // hex(HMAC_SHA256(secret, "<ts>." + raw)). Value generated with Python's hmac.
@@ -23,5 +24,35 @@ describe("signHeaders", () => {
     expect(ts).toBeGreaterThanOrEqual(before);
     expect(ts).toBeLessThanOrEqual(Date.now());
     expect(h["x-signature"]).toBe(signBody(SECRET, ts, BODY));
+  });
+});
+
+describe("forwardInbound", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function captureFetch(): Array<{ url: string; init: RequestInit }> {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response("{}", { status: 200 });
+    });
+    return calls;
+  }
+
+  it("sends X-Signature/X-Timestamp when SHARED_SECRET is set", async () => {
+    const calls = captureFetch();
+    await forwardInbound("http://backend/", "s3cr3t", { from: "+1", body: "hi" });
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers["x-signature"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(Number(headers["x-timestamp"])).toBeGreaterThan(0);
+    expect(calls[0]!.url).toBe("http://backend/comms/inbound");
+  });
+
+  it("sends unsigned when the secret is empty (stub-mode path)", async () => {
+    const calls = captureFetch();
+    await forwardInbound("http://backend/", "", { from: "+1", body: "hi" });
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers["x-signature"]).toBeUndefined();
+    expect(headers["x-timestamp"]).toBeUndefined();
   });
 });

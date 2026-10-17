@@ -58,6 +58,25 @@ def verify_event(secret: str, raw_body: bytes, signature: Optional[str]) -> tupl
 INBOUND_MAX_AGE_MS = 30_000
 
 
+class ReplayCache:
+    """Remembers the signatures (and gateway messageIds) of accepted inbound
+    replies for the freshness window, so a captured signed request cannot be
+    replayed. Entries are pruned on every check; bounded to 2x the window."""
+
+    def __init__(self, window_ms: int = INBOUND_MAX_AGE_MS):
+        self._window_ms = window_ms
+        self._seen: dict[str, float] = {}
+
+    def is_replay(self, key: str, now_ms: float) -> bool:
+        """True when key was accepted before; otherwise records it."""
+        cutoff = now_ms - 2 * self._window_ms
+        self._seen = {k: t for k, t in self._seen.items() if t > cutoff}
+        if key in self._seen:
+            return True
+        self._seen[key] = now_ms
+        return False
+
+
 def verify_inbound(secret: str, raw_body: bytes, signature: Optional[str],
                    ts_header: Optional[str]) -> tuple[bool, str]:
     """Check X-Signature + X-Timestamp on POST /comms/inbound (section 6.6).

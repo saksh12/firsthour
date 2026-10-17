@@ -5,6 +5,7 @@ TODO(phase 1, C): voice.py replaces `speak`; comms-gateway replaces the stub out
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -17,12 +18,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import make_command, verify_event, verify_inbound
+from .security import ReplayCache, make_command, verify_event, verify_inbound
 from .telemetry import Telemetry
 from .triage import StepFun
 from .unlock import UnlockGuard
@@ -86,6 +87,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
+    inbound_replays = ReplayCache()
 
     telemetry = Telemetry.init(s.get("SENTRY_DSN", ""), transport=s.get("SENTRY_TRANSPORT"))
 
@@ -191,6 +193,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         log.info("CORS allowed origins=%s", origins)
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
+    app.state.inbound_replays = inbound_replays
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
@@ -212,7 +215,11 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         if not ok:
             log.warning("edge event rejected reason=%s", reason)
             raise HTTPException(status_code=401, detail=reason)
-        event = EdgeEvent.model_validate_json(raw)
+        try:
+            event = EdgeEvent.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("edge event rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed event")
         last_heartbeat[event.device_id] = time.time()
         if event.type != "heartbeat":
             log.info("edge event type=%s device_id=%s local_incident_id=%s",
@@ -267,7 +274,25 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             if not ok:
                 log.warning("inbound rejected reason=%s", reason)
                 raise HTTPException(status_code=401, detail=reason)
-        msg = InboundMessage.model_validate_json(raw)
+            # A captured signed reply stays valid inside the freshness window, so
+            # dedupe: the signature covers the whole body, and the gateway's
+            # messageId catches a re-signed copy of the same Photon message.
+            keys = [signature]
+            try:
+                message_id = json.loads(raw).get("messageId")
+            except ValueError:
+                message_id = None
+            if message_id:
+                keys.append(f"mid:{message_id}")
+            now_ms = time.time() * 1000
+            if any(inbound_replays.is_replay(k, now_ms) for k in keys):
+                log.warning("inbound rejected reason=replay")
+                raise HTTPException(status_code=409, detail="replay")
+        try:
+            msg = InboundMessage.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("inbound rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed inbound message")
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")

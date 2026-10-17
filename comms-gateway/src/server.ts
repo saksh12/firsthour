@@ -47,7 +47,9 @@ export async function forwardInbound(
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...signHeaders(sharedSecret, body),
+      // Unsigned when the secret is unset: the backend then only accepts the
+      // forward while its STUB_PHOTON=1 (the simulator path); index.ts warns.
+      ...(sharedSecret ? signHeaders(sharedSecret, body) : {}),
     },
     body,
   });

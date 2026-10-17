@@ -29,6 +29,9 @@ def post_inbound(client, payload, secret=SECRET, ts=None, sign=True):
     return client.post("/comms/inbound", content=body, headers=headers)
 
 
+TS = 1_760_000_000_000
+
+
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(create_app(settings(STUB_PHOTON=False)))
@@ -118,3 +121,107 @@ def test_bad_signature_rejected_even_in_stub_mode():
     c = TestClient(create_app(settings()))
     r = post_inbound(c, GATEWAY_PAYLOAD, secret="wrong-secret")
     assert r.status_code == 401
+
+
+# --- malformed bodies: 422, never an unhandled 500 ----------------------------
+
+
+def test_signed_body_missing_body_field_is_422(client):
+    r = post_inbound(client, {"from": CAREGIVER, "platform": "imessage"})
+    assert r.status_code == 422
+
+
+def test_from_as_number_is_422(client):
+    r = post_inbound(client, {**GATEWAY_PAYLOAD, "from": 123})
+    assert r.status_code == 422
+
+
+def test_non_json_body_is_422(client):
+    body = b"this is not json"
+    ts = now_ms()
+    r = client.post("/comms/inbound", content=body, headers={
+        "Content-Type": "application/json",
+        "X-Signature": sign_event(SECRET, ts, body),
+        "X-Timestamp": str(ts),
+    })
+    assert r.status_code == 422
+
+
+def test_unsigned_empty_body_is_422_in_stub_mode():
+    c = TestClient(create_app(settings()))
+    assert c.post("/comms/inbound", json={}).status_code == 422
+
+
+def test_malformed_edge_event_is_422(client):
+    """Same bug class on /edge/event: validly signed but invalid schema."""
+    body = json.dumps({"ts": TS}).encode()  # missing device_id, type
+    r = client.post("/edge/event", content=body, headers={
+        "Content-Type": "application/json",
+        "X-Signature": sign_event(SECRET, TS, body),
+    })
+    assert r.status_code == 422
+
+
+def send_raw(client, body: bytes, ts: int):
+    """Resend the identical captured request (same body, same signature)."""
+    return client.post("/comms/inbound", content=body, headers={
+        "Content-Type": "application/json",
+        "X-Signature": sign_event(SECRET, ts, body),
+        "X-Timestamp": str(ts),
+    })
+
+
+# --- replay inside the 30 s window --------------------------------------------
+
+
+def test_replayed_signed_reply_is_409_and_does_not_lock_out():
+    c = TestClient(create_app(settings()))
+    code = escalate(c)
+    body = json.dumps({**GATEWAY_PAYLOAD, "body": "UNLOCK 0000"}).encode()
+    ts = now_ms()
+    assert send_raw(c, body, ts).status_code == 200  # first delivery: bad code
+    for _ in range(3):
+        r = send_raw(c, body, ts)
+        assert r.status_code == 409 and r.json()["detail"] == "replay"
+    # The replays did not burn the 3-try lockout: the real reply still works.
+    ok = post_inbound(c, {**GATEWAY_PAYLOAD, "body": f"UNLOCK {code}", "messageId": "msg_2"})
+    assert ok.status_code == 200 and ok.json()["allowed"] is True
+
+
+def test_replayed_valid_unlock_is_409_and_queues_one_command():
+    c = TestClient(create_app(settings()))
+    code = escalate(c)
+    body = json.dumps({**GATEWAY_PAYLOAD, "body": f"UNLOCK {code}"}).encode()
+    ts = now_ms()
+    assert send_raw(c, body, ts).json()["allowed"] is True
+    assert send_raw(c, body, ts).status_code == 409
+    cmds = c.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
+    assert [x["action"] for x in cmds] == ["unlock"]  # no second unlock queued
+
+
+def test_same_message_id_resigned_is_replay():
+    """A re-sign (new ts, new signature) of the same Photon message is deduped."""
+    c = TestClient(create_app(settings()))
+    assert post_inbound(c, GATEWAY_PAYLOAD).status_code == 200
+    r = post_inbound(c, GATEWAY_PAYLOAD, ts=now_ms() + 1)
+    assert r.status_code == 409
+
+
+def test_unsigned_stub_requests_are_not_deduped():
+    c = TestClient(create_app(settings()))
+    for _ in range(2):
+        r = c.post("/comms/inbound", json={"sender": STRANGER, "text": "UNLOCK 0000"})
+        assert r.status_code == 200
+
+
+def test_replay_cache_prunes_old_entries():
+    from app.security import ReplayCache
+
+    cache = ReplayCache()
+    t0 = now_ms()
+    assert not cache.is_replay("sig1", t0)
+    assert cache.is_replay("sig1", t0 + 1000)
+    # Entries older than 2x the window are dropped on the next check.
+    cache._seen["sig1"] = t0 - 3 * INBOUND_MAX_AGE_MS
+    assert not cache.is_replay("sig2", t0 + 1000)
+    assert "sig1" not in cache._seen
