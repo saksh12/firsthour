@@ -1,0 +1,2 @@
+# The Pi: stdlib plus pyserial only (AGENTS.md). TODO(verify) pyserial on the QNX image.
+pyserial==3.5
