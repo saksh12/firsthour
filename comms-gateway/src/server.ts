@@ -20,6 +20,7 @@ import {
   type ReceivedMessage,
 } from "./messages.js";
 import type { PhotonGateway } from "./photon.js";
+import { signHeaders } from "./sign.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -34,15 +35,21 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
-/** Forward one caregiver reply to the backend. Returns the backend's JSON. */
+/** Forward one caregiver reply to the backend, signed (section 6.6).
+ *  Returns the backend's JSON. */
 export async function forwardInbound(
   backendUrl: string,
+  sharedSecret: string,
   payload: InboundForward | { from: string; body: string },
 ): Promise<unknown> {
+  const body = JSON.stringify(payload);
   const resp = await fetch(`${backendUrl.replace(/\/$/, "")}/comms/inbound`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: {
+      "content-type": "application/json",
+      ...signHeaders(sharedSecret, body),
+    },
+    body,
   });
   if (!resp.ok) throw new Error(`backend /comms/inbound -> ${resp.status}`);
   return resp.json().catch(() => ({}));
@@ -89,7 +96,7 @@ export function createServer(cfg: Config, gateway: PhotonGateway) {
         } else {
           return send(res, 400, { error: "expected a Photon message or { from, body }" });
         }
-        const backendReply = await forwardInbound(cfg.backendUrl, payload);
+        const backendReply = await forwardInbound(cfg.backendUrl, cfg.sharedSecret, payload);
         return send(res, 200, { forwarded: true, backend: backendReply });
       }
 
@@ -121,7 +128,7 @@ export function startInboundPoller(
         if (seen.has(m.id)) continue;
         seen.add(m.id);
         if (isCaregiverReply(m, cfg.photon.agentHandle)) {
-          await forwardInbound(cfg.backendUrl, toBackendInbound(m));
+          await forwardInbound(cfg.backendUrl, cfg.sharedSecret, toBackendInbound(m));
         }
         if (m.createdAt > since) since = m.createdAt;
       }

@@ -7,7 +7,7 @@ All timestamps are UTC epoch milliseconds.
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 # --- 6.2 Edge to backend -----------------------------------------------------
 
@@ -81,10 +81,16 @@ class TriageRecord(BaseModel):
 
 
 class InboundMessage(BaseModel):
-    """A caregiver reply, from Photon or the simulator page (same endpoint)."""
+    """A caregiver reply, from the comms-gateway or the simulator page (same endpoint).
 
-    sender: str
-    text: str
+    The gateway forwards Photon received-messages as
+    ``{from, body, platform, spaceId, senderId, messageId}``; the simulator page
+    posts ``{sender, text}``. Both name pairs are accepted and the extra gateway
+    fields are ignored.
+    """
+
+    sender: str = Field(validation_alias=AliasChoices("sender", "from"))
+    text: str = Field(validation_alias=AliasChoices("text", "body"))
 
 
 class UnlockResult(BaseModel):

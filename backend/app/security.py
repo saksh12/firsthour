@@ -53,3 +53,28 @@ def verify_event(secret: str, raw_body: bytes, signature: Optional[str]) -> tupl
     if not hmac.compare_digest(sign_event(secret, ts, raw_body), signature):
         return False, "bad signature"
     return True, "ok"
+
+
+INBOUND_MAX_AGE_MS = 30_000
+
+
+def verify_inbound(secret: str, raw_body: bytes, signature: Optional[str],
+                   ts_header: Optional[str]) -> tuple[bool, str]:
+    """Check X-Signature + X-Timestamp on POST /comms/inbound (section 6.6).
+
+    Same scheme as /edge/event: hex(HMAC_SHA256(secret, ts + "." + raw_body)),
+    but the timestamp arrives in the X-Timestamp header and must be fresh:
+    unlike the Pi's replayed log, a caregiver reply is live, so a stale one
+    is a replay or a broken client.
+    """
+    if not signature:
+        return False, "missing signature"
+    try:
+        ts = int(ts_header or "")
+    except ValueError:
+        return False, "missing timestamp" if not ts_header else "malformed timestamp"
+    if not hmac.compare_digest(sign_event(secret, ts, raw_body), signature):
+        return False, "bad signature"
+    if abs(time.time() * 1000 - ts) > INBOUND_MAX_AGE_MS:
+        return False, "stale"
+    return True, "ok"

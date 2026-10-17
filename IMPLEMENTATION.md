@@ -297,6 +297,32 @@ Or reply with a message and we'll read it to her.
 
 Inbound grammar: `UNLOCK <4 digits>` unlocks if rules pass. Anything else is a message to read aloud (rewritten to one short calm sentence, max 20 words).
 
+**Gateway → backend: `POST /comms/inbound`**
+
+The comms-gateway forwards a caregiver reply as:
+
+```json
+{
+  "from": "+13105550101",
+  "body": "UNLOCK 4821",
+  "platform": "imessage",
+  "spaceId": "space_1",
+  "senderId": "u_agent",
+  "messageId": "msg_1"
+}
+```
+
+The backend reads `from`/`body` (aliases of the simulator page's `sender`/`text`) and ignores the rest.
+
+Headers, same scheme as `POST /edge/event` (section 6.2):
+
+```text
+X-Timestamp: <epoch ms>
+X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))
+```
+
+A missing, bad, or stale (over 30 s old) signature is refused with 401. Only while `STUB_PHOTON=1` are **unsigned** requests allowed, so the dashboard and caregiver-simulator pages keep working; a signature that is present is always verified. The gateway signs with `SHARED_SECRET` from the root `.env`.
+
 ### 6.7 Dashboard live events (WebSocket from backend)
 
 `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`.

@@ -13,6 +13,12 @@ server.listen(cfg.port, () => {
   console.log(`comms-gateway listening on :${cfg.port} — ${mode}`);
   console.log(`forwarding inbound to ${cfg.backendUrl}/comms/inbound`);
 
+  if (!cfg.sharedSecret) {
+    console.error(
+      "SHARED_SECRET is not set; the backend rejects signed inbound forwards with 401 " +
+        "when STUB_PHOTON=0. Fill it in .env.",
+    );
+  }
   if (!cfg.stubPhoton) {
     if (!hasPhotonCreds(cfg)) {
       console.error(

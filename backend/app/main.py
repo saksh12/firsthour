@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import make_command, verify_event
+from .security import make_command, verify_event, verify_inbound
 from .telemetry import Telemetry
 from .triage import StepFun
 from .unlock import UnlockGuard
@@ -248,8 +248,26 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         return machine.snapshot()
 
     @app.post("/comms/inbound")
-    def comms_inbound(msg: InboundMessage):
-        """Caregiver reply from Photon or the simulator page (same endpoint)."""
+    async def comms_inbound(request: Request):
+        """Caregiver reply from the comms-gateway or the simulator page (same endpoint).
+
+        The gateway signs with X-Signature/X-Timestamp (section 6.6). The
+        dashboard and simulator pages are unsigned, which is only allowed
+        while STUB_PHOTON=1; a presented signature is always checked.
+        """
+        raw = await request.body()
+        signature = request.headers.get("X-Signature")
+        if signature is None:
+            if not s["STUB_PHOTON"]:
+                log.warning("inbound rejected reason=missing signature")
+                raise HTTPException(status_code=401, detail="missing signature")
+        else:
+            ok, reason = verify_inbound(secret, raw, signature,
+                                        request.headers.get("X-Timestamp"))
+            if not ok:
+                log.warning("inbound rejected reason=%s", reason)
+                raise HTTPException(status_code=401, detail=reason)
+        msg = InboundMessage.model_validate_json(raw)
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")

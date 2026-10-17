@@ -4,6 +4,7 @@ export interface Config {
   port: number;
   stubPhoton: boolean;
   backendUrl: string; // where inbound caregiver replies are forwarded
+  sharedSecret: string; // SHARED_SECRET, signs forwarded replies (X-Signature)
   photon: {
     token: string; // PHOTON_TOKEN  (project API key, pho_sk_...)
     projectId: string; // PHOTON_PROJECT_ID (pho_prj_...)
@@ -22,6 +23,7 @@ export function loadConfig(): Config {
     // STUB_PHOTON=1 (default) => no SDK, no creds, no network.
     stubPhoton: env("STUB_PHOTON", "1") !== "0",
     backendUrl: env("BACKEND_URL", "http://localhost:8000"),
+    sharedSecret: env("SHARED_SECRET"),
     photon: {
       token: env("PHOTON_TOKEN"),
       projectId: env("PHOTON_PROJECT_ID"),
