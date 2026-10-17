@@ -110,10 +110,20 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
 
+    def close_on_pi(inc, final) -> None:
+        q = queues[inc.device_id]
+        # The incident is over: an unlock the Pi hasn't picked up yet must not open the door.
+        dropped = [c for c in q if c.action == "unlock" and c.incident_id == inc.id]
+        q[:] = [c for c in q if c not in dropped]
+        cmd = make_command(secret, "alarm_off", inc.id)
+        q.append(cmd)
+        log.info("command queued action=alarm_off incident_id=%s device_id=%s id=%s final=%s dropped_unlocks=%d",
+                 inc.id, inc.device_id, cmd.id, final.value, len(dropped))
+
     guard = UnlockGuard(allowed=s["CAREGIVER_NUMBERS"], window_s=s["INCIDENT_WINDOW_SECONDS"],
                         on_grant=queue_unlock)
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
-                              emit=emit, speak=speak, send_alert=send_alert)
+                              emit=emit, speak=speak, send_alert=send_alert, on_close=close_on_pi)
 
     @asynccontextmanager
     async def lifespan(_app):
