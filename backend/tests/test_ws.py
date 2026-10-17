@@ -67,8 +67,7 @@ def test_full_incident_streams_contract_events_and_never_the_code(monkeypatch):
 
         everything = [tri, refused, granted, *seen, *more]
         assert {m["type"] for m in everything} <= CONTRACT_TYPES
-        # The caregiver's own texts include the code; the dashboard must never show it.
-        assert all("4821" not in json.dumps(m) for m in everything if m["type"] != "message_in")
+        assert all("4821" not in json.dumps(m) for m in everything)
 
 
 def test_device_status_event_on_edge_event():
