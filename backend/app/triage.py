@@ -258,10 +258,12 @@ class StepFun:
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "temperature": 0.1,
             "max_tokens": max_tokens,
-            # TODO(verify): StepFun docs for a low-reasoning-effort parameter on step-5-preview.
+            # step-5-preview reasons before it answers; low is the fastest documented level.
+            # https://platform.stepfun.ai/docs/en/guides/models/step-5-preview
+            "reasoning_effort": "low",
         }
         if json_mode:
-            body["response_format"] = {"type": "json_object"}  # TODO(verify) supported on our key
+            body["response_format"] = {"type": "json_object"}  # verified on our key, Oct 17
         headers = {"Authorization": f"Bearer {self.api_key}"}
         fut = self._pool.submit(self._transport, self.url, headers, body, self.timeout_s)
         try:
@@ -283,7 +285,7 @@ class StepFun:
             return rules
         t0 = time.monotonic()
         try:
-            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=300)
+            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=1200)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
@@ -311,7 +313,7 @@ class StepFun:
             return text
         t0 = time.monotonic()
         try:
-            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=60).strip().strip('"')
+            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200).strip().strip('"')
             if not out:
                 raise StepFunError("empty")
             if len(out.split()) > MAX_REWRITE_WORDS:

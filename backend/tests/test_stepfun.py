@@ -67,6 +67,9 @@ def test_request_shape():
     assert headers["Authorization"] == "Bearer k-test"
     assert body["model"] == "step-5-preview"
     assert body["response_format"] == {"type": "json_object"}
+    assert body["reasoning_effort"] == "low"
+    # Reasoning tokens count against max_tokens: a small budget returns an empty answer.
+    assert body["max_tokens"] >= 1000
     assert body["temperature"] <= 0.2
     user = body["messages"][1]["content"]
     assert "Q: Did you hit your head?\nA: no" in user
