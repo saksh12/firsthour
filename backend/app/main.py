@@ -1,71 +1,117 @@
-"""FastAPI skeleton: /health, the edge contract, and caregiver inbound.
+"""FastAPI app: /health, the edge contract, the person's answers, and caregiver inbound.
 
-TODO(phase 1): the incident state machine (incident.py), triage, voice, comms and the
-dashboard WebSocket plug in here. For now a fall_suspected event opens the unlock window
-directly.
+TODO(phase 1): dashboard WebSocket (section 6.7) streams `app.state.events`;
+voice.py replaces `speak`; comms-gateway replaces the stub outbox.
 """
 
+import asyncio
 import logging
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from .models import CommandsResponse, EdgeEvent, InboundMessage
+from .incident import IncidentMachine
+from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
+from .profile import DEMO_PROFILE
 from .security import make_command, verify_event
-from .unlock import UnlockGuard, is_unlock_attempt
+from .unlock import UnlockGuard
 
 log = logging.getLogger("firsthour.api")
 
 HEARTBEAT_STALE_S = 30
+TICK_S = 0.25
 DEFAULT_SECRET = "change-me-before-demo"
+
+
+class PersonAnswer(BaseModel):
+    text: str
 
 
 def load_settings() -> dict:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     return {
         "STUB_EDGE": os.getenv("STUB_EDGE", "1") == "1",
+        "STUB_PHOTON": os.getenv("STUB_PHOTON", "1") == "1",
         "SHARED_SECRET": os.environ.get("SHARED_SECRET", ""),
         "CAREGIVER_NUMBERS": os.getenv("CAREGIVER_NUMBERS", ""),
         "INCIDENT_WINDOW_SECONDS": int(os.getenv("INCIDENT_WINDOW_SECONDS", "600")),
+        "UNLOCK_HOLD_SECONDS": int(os.getenv("UNLOCK_HOLD_SECONDS", "30")),
     }
 
 
 def create_app(settings: Optional[dict] = None) -> FastAPI:
-    s = settings or load_settings()
+    s = {"STUB_PHOTON": True, "UNLOCK_HOLD_SECONDS": 30, **(settings or load_settings())}
     secret = s["SHARED_SECRET"]
     if not secret:
         raise RuntimeError("SHARED_SECRET is not set; copy .env.example to .env")
     if secret == DEFAULT_SECRET:
         log.warning("SHARED_SECRET is still the example value; change it before the demo")
 
-    app = FastAPI(title="FirstHour backend")
     queues: dict[str, list] = defaultdict(list)
     last_heartbeat: dict[str, float] = {}
-    state = {"device_id": None}
+    events: deque = deque(maxlen=500)
+    outbox: list[dict] = []
+    spoken: deque = deque(maxlen=100)
+
+    def emit(type_: str, data: dict) -> None:
+        events.append(DashboardEvent(type=type_, data=data))
+
+    def speak(text: str) -> None:
+        # TODO(C): voice.py plays cached ElevenLabs audio here.
+        spoken.append(text)
+        log.info("say %r", text)
+
+    def send_alert(incident_id: str, text: str) -> None:
+        to = sorted(guard.allowed)
+        if s["STUB_PHOTON"]:
+            outbox.append({"to": to, "incident_id": incident_id, "text": text, "ts": int(time.time() * 1000)})
+        else:
+            # TODO(C): POST to comms-gateway. Until then the simulator page is the path.
+            log.error("STUB_PHOTON=0 but comms-gateway is not wired yet incident_id=%s", incident_id)
+        # The dashboard gets that an alert went out, not its text: the text carries the code.
+        emit("message_out", {"to": to, "incident_id": incident_id, "kind": "alert"})
+        log.info("alert sent incident_id=%s to=%s stub=%s", incident_id, to, s["STUB_PHOTON"])
 
     def queue_unlock(incident_id: str) -> None:
-        device = state["device_id"]
-        if device is None:
-            log.error("unlock granted but no device known incident_id=%s", incident_id)
+        inc = machine.incident
+        if not inc or inc.id != incident_id:
+            log.error("unlock granted but incident not open in machine incident_id=%s", incident_id)
             return
         cmd = make_command(secret, "unlock", incident_id)
-        queues[device].append(cmd)
-        log.info("command queued action=unlock incident_id=%s device_id=%s id=%s", incident_id, device, cmd.id)
+        queues[inc.device_id].append(cmd)
+        log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
+                 incident_id, inc.device_id, cmd.id)
 
-    guard = UnlockGuard(
-        allowed=s["CAREGIVER_NUMBERS"],
-        window_s=s["INCIDENT_WINDOW_SECONDS"],
-        on_grant=queue_unlock,
-    )
-    app.state.guard = guard
-    app.state.queues = queues
-    app.state.alert_code = None  # read by comms.py when it formats the alert; never returned by an API
+    guard = UnlockGuard(allowed=s["CAREGIVER_NUMBERS"], window_s=s["INCIDENT_WINDOW_SECONDS"],
+                        on_grant=queue_unlock)
+    machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
+                              emit=emit, speak=speak, send_alert=send_alert)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async def ticker():
+            while True:
+                try:
+                    machine.tick()
+                except Exception:  # never let the loop die mid-incident
+                    log.exception("tick failed")
+                await asyncio.sleep(TICK_S)
+
+        task = asyncio.create_task(ticker())
+        yield
+        task.cancel()
+
+    app = FastAPI(title="FirstHour backend", lifespan=lifespan)
+    app.state.guard, app.state.machine = guard, machine
+    app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
 
     @app.get("/health")
     def health():
@@ -86,19 +132,20 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             raise HTTPException(status_code=401, detail=reason)
         event = EdgeEvent.model_validate_json(raw)
         last_heartbeat[event.device_id] = time.time()
-        log.info("edge event type=%s device_id=%s local_incident_id=%s",
-                 event.type, event.device_id, event.local_incident_id)
+        if event.type != "heartbeat":
+            log.info("edge event type=%s device_id=%s local_incident_id=%s",
+                     event.type, event.device_id, event.local_incident_id)
+            emit("device_status", {"device_id": event.device_id, "event": event.type})
 
-        incident_id = guard.active_incident_id
-        if event.type == "fall_suspected" and incident_id is None:
-            incident_id = event.local_incident_id or f"{event.device_id}-{event.ts}"
-            state["device_id"] = event.device_id
-            app.state.alert_code = guard.open_incident(incident_id)
+        if event.type == "fall_suspected":
+            machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}")
+        elif event.type == "help_button":
+            machine.on_help_button()
         elif event.type == "cancelled":
-            guard.close_incident()
-            app.state.alert_code = None
-            incident_id = None
-        return {"ok": True, "incident_id": incident_id}
+            machine.cancel("cancelled on device")
+        # nfc_tap / local_unlock: the Pi already decided; we only log and show them.
+        inc = machine.incident
+        return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 
     @app.get("/edge/commands", response_model=CommandsResponse)
     def edge_commands(device_id: str):
@@ -106,15 +153,32 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         pending, queues[device_id] = queues[device_id], []
         return CommandsResponse(commands=pending)
 
+    @app.post("/person/answer")
+    def person_answer(ans: PersonAnswer):
+        """What the person on the floor said (speech-to-text, or the operator's typed fallback)."""
+        machine.on_answer(ans.text)
+        return machine.snapshot()
+
     @app.post("/comms/inbound")
     def comms_inbound(msg: InboundMessage):
-        """Caregiver reply from Photon or the simulator page."""
-        if is_unlock_attempt(msg.text):
-            result = guard.try_unlock(msg.sender, msg.text)
-            return {"type": "unlock_attempt", "allowed": result.allowed, "reason": result.reason}
-        # TODO(phase 1, C): rewrite to one calm sentence (triage.py) and read it aloud (voice.py).
-        log.info("caregiver message sender=%s incident_id=%s", msg.sender, guard.active_incident_id)
-        return {"type": "message", "queued_for_voice": False}
+        """Caregiver reply from Photon or the simulator page (same endpoint)."""
+        return machine.caregiver_reply(msg.sender, msg.text)
+
+    @app.get("/incident")
+    def incident():
+        return machine.snapshot()
+
+    @app.post("/incident/resolve")
+    def resolve():
+        return {"resolved": machine.resolve("operator"), **machine.snapshot()}
+
+    @app.get("/comms/stub/outbox")
+    def stub_outbox():
+        """The simulated caregiver phone's inbox. Exists only while STUB_PHOTON=1:
+        with real Photon, the alert (and its code) only ever reaches the enrolled phone."""
+        if not s["STUB_PHOTON"]:
+            raise HTTPException(status_code=404)
+        return {"messages": outbox[-20:]}
 
     return app
 

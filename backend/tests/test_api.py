@@ -1,6 +1,7 @@
 """End to end over HTTP: signed fall event -> caregiver UNLOCK -> Pi polls -> Pi verifies."""
 
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -57,10 +58,23 @@ def test_unsigned_event_rejected(client):
     assert r.status_code == 401
 
 
+def escalate(client) -> str:
+    """Fall, the person asks for help, return the code from the simulated caregiver inbox."""
+    assert post_event(client).status_code == 200
+    client.post("/person/answer", json={"text": "Help, I slipped and can't move my leg"})
+    msgs = client.get("/comms/stub/outbox").json()["messages"]
+    return re.search(r"UNLOCK (\d{4})", msgs[-1]["text"]).group(1)
+
+
+def test_fall_opens_checking_with_no_alert_yet(client):
+    r = post_event(client).json()
+    assert r["state"] == "CHECKING" and r["incident_id"] == f"bath-01-{TS}"
+    assert client.get("/comms/stub/outbox").json() == {"messages": []}
+
+
 def test_full_unlock_path_and_stranger_refused(client):
-    r = post_event(client)
-    assert r.status_code == 200 and r.json()["incident_id"] == f"bath-01-{TS}"
-    code = client.app.state.alert_code
+    code = escalate(client)
+    assert client.get("/incident").json()["state"] == "ALERTING"
 
     stranger = client.post("/comms/inbound", json={"sender": STRANGER, "text": f"UNLOCK {code}"}).json()
     assert stranger == {"type": "unlock_attempt", "allowed": False, "reason": "not enrolled"}
@@ -68,6 +82,7 @@ def test_full_unlock_path_and_stranger_refused(client):
 
     ok = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()
     assert ok["allowed"] is True
+    assert client.get("/incident").json()["state"] == "UNLOCKED"
 
     cmds = client.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
     assert [c["action"] for c in cmds] == ["unlock"]
@@ -79,27 +94,62 @@ def test_full_unlock_path_and_stranger_refused(client):
     assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
 
 
-def test_second_fall_event_keeps_the_same_incident_and_code(client):
+def test_im_fine_cancels_and_no_alert_is_sent(client):
     post_event(client)
-    code = client.app.state.alert_code
-    r = post_event(client, ts=TS + 5000)
-    assert r.json()["incident_id"] == f"bath-01-{TS}"
-    assert client.app.state.alert_code == code
+    snap = client.post("/person/answer", json={"text": "I'm fine"}).json()
+    assert snap["state"] == "IDLE"
+    assert client.get("/comms/stub/outbox").json() == {"messages": []}
+
+
+def test_second_fall_event_keeps_the_same_incident(client):
+    post_event(client)
+    r = post_event(client, ts=TS + 5000).json()
+    assert r["incident_id"] == f"bath-01-{TS}"
 
 
 def test_cancelled_event_closes_incident(client):
-    post_event(client)
-    code = client.app.state.alert_code
+    code = escalate(client)
     post_event(client, "cancelled", ts=TS + 1000)
     r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()
     assert r["reason"] == "no active incident"
 
 
-def test_non_unlock_reply_is_a_message(client):
-    post_event(client)
+def test_resolve_endpoint(client):
+    code = escalate(client)
+    assert client.post("/incident/resolve").json()["resolved"] is True
+    r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()
+    assert r["reason"] == "no active incident"
+
+
+def test_caregiver_message_is_read_aloud(client):
+    escalate(client)
     r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "I'm 2 minutes away"}).json()
-    assert r["type"] == "message"
+    assert r == {"type": "message", "accepted": True}
+    assert client.app.state.spoken[-1] == "I'm 2 minutes away"
+    assert client.get("/incident").json()["state"] == "RESPONDING"
     assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+
+
+def test_incident_snapshot_and_events_never_contain_the_code(client, monkeypatch):
+    # Pin the code: a random one could appear by chance inside a timestamp.
+    monkeypatch.setattr("app.unlock.secrets.randbelow", lambda n: 4821)
+    code = escalate(client)
+    assert code == "4821"
+    snap = client.get("/incident").json()
+    assert snap["triage"]["can_move"] is False and snap["transcript"]
+    assert code not in json.dumps(snap)
+    assert all(code not in e.model_dump_json() for e in client.app.state.events)
+
+
+def test_stub_outbox_is_gone_when_photon_is_real():
+    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    assert c.get("/comms/stub/outbox").status_code == 404
+
+
+def test_help_button_escalates(client):
+    post_event(client)
+    post_event(client, "help_button", ts=TS + 500)
+    assert client.get("/incident").json()["state"] == "ALERTING"
 
 
 def test_missing_secret_refuses_to_start():

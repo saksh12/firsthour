@@ -142,9 +142,12 @@ def test_14_every_attempt_is_logged_with_its_reason(guard, caplog):
         assert reason in line
 
 
-def test_code_never_appears_in_logs(guard, caplog):
+def test_code_never_appears_in_logs(guard, caplog, monkeypatch):
+    # Pin the code: a random one could appear by chance inside the phone number.
+    monkeypatch.setattr("app.unlock.secrets.randbelow", lambda n: 4821)
     caplog.set_level(logging.DEBUG, logger="firsthour.unlock")
     code = guard.open_incident("inc-1")
+    assert code == "4821"
     guard.try_unlock(CAREGIVER, f"UNLOCK {code}")
     assert all(code not in rec.getMessage() for rec in caplog.records)
 
