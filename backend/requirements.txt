@@ -3,6 +3,7 @@ uvicorn==0.54.0
 websockets==17.2        # uvicorn needs it to serve /ws/dashboard
 pydantic==2.14.1
 python-dotenv==1.2.4
+sentry-sdk==2.72.0      # tracing + logs; no-op without SENTRY_DSN
 # tests
 pytest==9.1.1
 httpx==0.28.1

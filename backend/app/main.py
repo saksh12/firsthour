@@ -23,6 +23,7 @@ from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import make_command, verify_event
+from .telemetry import Telemetry
 from .triage import StepFun
 from .unlock import UnlockGuard
 
@@ -54,6 +55,7 @@ def load_settings() -> dict:
         "STEPFUN_API_KEY": os.getenv("STEPFUN_API_KEY", ""),
         "STEPFUN_BASE_URL": os.getenv("STEPFUN_BASE_URL", ""),
         "STEPFUN_MODEL": os.getenv("STEPFUN_MODEL", "step-5-preview"),
+        "SENTRY_DSN": os.getenv("SENTRY_DSN", ""),
     }
 
 
@@ -85,9 +87,17 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
 
+    telemetry = Telemetry.init(s.get("SENTRY_DSN", ""), transport=s.get("SENTRY_TRANSPORT"))
+
+    def current_incident_id() -> Optional[str]:
+        inc = machine.incident
+        return inc.id if inc else None
+
     def emit(type_: str, data: dict) -> None:
         ev = DashboardEvent(type=type_, data=data)
         events.append(ev)
+        inc = machine.incident
+        telemetry.on_event(type_, data, device_id=inc.device_id if inc else "")
         loop = loop_ref["loop"]
         if loop is None:
             return
@@ -127,6 +137,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             return
         cmd = make_command(secret, "unlock", incident_id)
         queues[inc.device_id].append(cmd)
+        telemetry.start(incident_id, f"cmd:{cmd.id}", "command_to_pi", action="unlock")
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
 
@@ -149,8 +160,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
-                              emit=emit, speak=speak, send_alert=send_alert, on_close=close_on_pi,
-                              triage_fn=stepfun.triage, rewrite_fn=stepfun.rewrite)
+                              emit=emit, on_close=close_on_pi, speak=speak,
+                              send_alert=telemetry.wrap("photon_send", send_alert, current_incident_id),
+                              triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
+                              rewrite_fn=stepfun.rewrite)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -167,6 +180,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         yield
         task.cancel()
         loop_ref["loop"] = None
+        telemetry.flush()
 
     app = FastAPI(title="FirstHour backend", lifespan=lifespan)
     if origins:
@@ -175,18 +189,21 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
                            allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
         log.info("CORS allowed origins=%s", origins)
-    app.state.guard, app.state.machine = guard, machine
+    app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
 
-    @app.get("/health")
+    @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
+        """Sentry Uptime Monitoring target. With STUB_EDGE=0: 503 when the Pi has been
+        silent for 30 s, so the monitor reflects whether the box is alive."""
         now = time.time()
         devices = {d: round(now - t, 1) for d, t in last_heartbeat.items()}
+        no_cache = {"Cache-Control": "no-store"}
         if s["STUB_EDGE"]:
-            return {"ok": True, "edge": "stubbed", "heartbeat_age_s": devices}
+            return JSONResponse({"ok": True, "edge": "stubbed", "heartbeat_age_s": devices}, headers=no_cache)
         alive = any(age <= HEARTBEAT_STALE_S for age in devices.values())
         body = {"ok": alive, "edge": "live", "heartbeat_age_s": devices}
-        return JSONResponse(body, status_code=200 if alive else 503)
+        return JSONResponse(body, status_code=200 if alive else 503, headers=no_cache)
 
     @app.post("/edge/event")
     async def edge_event(request: Request):
@@ -204,6 +221,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         if event.type == "fall_suspected":
             machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}")
+            sensors = event.sensors.model_dump()
+            with telemetry.span(current_incident_id(), "sensor_event", **sensors,
+                                edge_to_backend_ms=int(time.time() * 1000) - event.ts):
+                pass
         elif event.type == "help_button":
             machine.on_help_button()
         elif event.type == "cancelled":
@@ -216,6 +237,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     def edge_commands(device_id: str):
         # Commands are signed and single-use, so handing them out once is enough.
         pending, queues[device_id] = queues[device_id], []
+        for c in pending:
+            telemetry.finish(c.incident_id, f"cmd:{c.id}", picked_up=True)
         return CommandsResponse(commands=pending)
 
     @app.post("/person/answer")
