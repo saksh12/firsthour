@@ -247,7 +247,7 @@ cd comms-gateway && npm install && npm run dev
 cd dashboard && npm install && npm run dev
 
 # edge on the laptop, no hardware
-python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # planned interface; update if edge/ differs
+python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, n for NFC
 
 # fake a fall end to end (stubs)
 python3 scripts/simulate_fall.py
