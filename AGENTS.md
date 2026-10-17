@@ -243,8 +243,8 @@ pytest -q                                     # must pass before merging
 # comms gateway
 cd comms-gateway && npm install && npm run dev
 
-# dashboard
-cd dashboard && npm install && npm run dev
+# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html)
+python3 -m http.server 5173 -d dashboard
 
 # edge on the laptop, no hardware
 python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, n for NFC
