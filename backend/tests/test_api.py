@@ -88,8 +88,8 @@ def test_full_unlock_path_and_stranger_refused(client):
     assert [c["action"] for c in cmds] == ["unlock"]
     # The Pi independently accepts it, and only once.
     pi = CommandVerifier(SECRET)
-    assert pi.check(cmds[0], local_incident_open=True) == (True, "ok")
-    assert pi.check(cmds[0], local_incident_open=True) == (False, "replay")
+    assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (True, "ok")
+    assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (False, "replay")
     # Commands are handed out once.
     assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
 
@@ -101,10 +101,19 @@ def test_im_fine_cancels_and_no_alert_is_sent(client):
     assert client.get("/comms/stub/outbox").json() == {"messages": []}
 
 
-def test_second_fall_event_keeps_the_same_incident(client):
+def test_replayed_fall_event_keeps_the_same_incident(client):
     post_event(client)
-    r = post_event(client, ts=TS + 5000).json()
+    r = post_event(client).json()
     assert r["incident_id"] == f"bath-01-{TS}"
+
+
+def test_new_local_incident_supersedes_a_stale_one(client):
+    # Issue #13 bug 2: the Pi opened a new incident, so the backend's open one is stale.
+    old_code = escalate(client)
+    r = post_event(client, ts=TS + 5000).json()
+    assert r == {"ok": True, "incident_id": f"bath-01-{TS + 5000}", "state": "CHECKING"}
+    stale = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {old_code}"}).json()
+    assert stale["reason"] == "no active incident"
 
 
 def test_cancelled_event_closes_incident(client):

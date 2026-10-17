@@ -158,9 +158,9 @@ def main() -> None:
     _, cmds = api.call("GET", f"/edge/commands?device_id={args.device}")
     check(len(cmds["commands"]) == 1 and cmds["commands"][0]["action"] == "unlock", "one unlock command")
     cmd = cmds["commands"][0]
-    ok, reason = pi.check(cmd, local_incident_open=True)
+    ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(ok, f"Pi accepts: {reason}  (real Pi would now send U to the Arduino)")
-    ok, reason = pi.check(cmd, local_incident_open=True)
+    ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(not ok and reason == "replay", "replaying the same command is refused")
 
     step("Operator resolves")

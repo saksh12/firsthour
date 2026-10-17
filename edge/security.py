@@ -24,8 +24,13 @@ def sign_event(secret, ts, raw_body):
     return _hmac_hex(secret, f"{ts}.".encode() + raw_body)
 
 
+# Commands that act on one incident. The Pi only obeys them for its own open incident,
+# so a stale backend incident can never unlock the door or silence a newer fall.
+INCIDENT_ACTIONS = ("unlock", "alarm_off")
+
+
 class CommandVerifier:
-    """Checks signature, freshness, nonce and (for unlock) the local incident."""
+    """Checks signature, freshness, nonce and, for incident actions, the local incident."""
 
     def __init__(self, secret, max_age_ms=MAX_AGE_MS, clock=time.time):
         self._secret = secret
@@ -33,13 +38,14 @@ class CommandVerifier:
         self._clock = clock
         self._seen = {}  # nonce -> ts; pruned so it can't grow forever on a long soak test
 
-    def check(self, cmd, local_incident_open):
-        ok, reason = self._check(cmd, local_incident_open)
+    def check(self, cmd, local_incident_id):
+        """local_incident_id: the Pi's open incident, or None."""
+        ok, reason = self._check(cmd, local_incident_id)
         log.info("command action=%s incident_id=%s accepted=%s reason=%s",
                  cmd.get("action"), cmd.get("incident_id"), ok, reason)
         return ok, reason
 
-    def _check(self, cmd, local_incident_open):
+    def _check(self, cmd, local_incident_id):
         if not all(k in cmd for k in _FIELDS) or not isinstance(cmd["ts"], int):
             return False, "malformed"
         msg = f'{cmd["action"]}|{cmd["incident_id"]}|{cmd["ts"]}|{cmd["nonce"]}'.encode()
@@ -51,9 +57,12 @@ class CommandVerifier:
         self._prune(now_ms)
         if cmd["nonce"] in self._seen:
             return False, "replay"
-        if cmd["action"] == "unlock" and not local_incident_open:
+        if cmd["action"] in INCIDENT_ACTIONS:
             # Don't record the nonce: the same command may be retried once the incident opens.
-            return False, "no local incident"
+            if local_incident_id is None:
+                return False, "no local incident"
+            if cmd["incident_id"] != local_incident_id:
+                return False, "other incident"
         self._seen[cmd["nonce"]] = cmd["ts"]
         return True, "ok"
 

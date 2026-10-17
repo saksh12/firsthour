@@ -220,7 +220,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             emit("device_status", {"device_id": event.device_id, "event": event.type})
 
         if event.type == "fall_suspected":
-            machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}")
+            machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}", event.ts)
             sensors = event.sensors.model_dump()
             with telemetry.span(current_incident_id(), "sensor_event", **sensors,
                                 edge_to_backend_ms=int(time.time() * 1000) - event.ts):

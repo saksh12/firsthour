@@ -89,8 +89,7 @@ def test_resolve_sends_signed_alarm_off_the_pi_accepts(client):
     assert [c["action"] for c in cmds] == ["alarm_off"]
     assert cmds[0]["incident_id"] == f"bath-01-{TS}"
     pi = CommandVerifier(SECRET)
-    # alarm_off is valid whether or not the Pi still has its local incident open
-    assert pi.check(cmds[0], local_incident_open=True) == (True, "ok")
+    assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (True, "ok")
 
 
 def test_im_fine_sends_alarm_off(client):
@@ -109,7 +108,7 @@ def test_alarm_off_signed_with_wrong_secret_is_refused_by_pi(client):
     post_event(client)
     client.post("/incident/resolve")
     cmd = poll(client)[0]
-    assert CommandVerifier("other-secret").check(cmd, local_incident_open=True) == (False, "bad signature")
+    assert CommandVerifier("other-secret").check(cmd, local_incident_id=cmd["incident_id"]) == (False, "bad signature")
 
 
 def test_resolve_drops_an_unlock_the_pi_has_not_picked_up(client):

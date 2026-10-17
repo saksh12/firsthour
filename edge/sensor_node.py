@@ -160,6 +160,9 @@ class UrlHttp:
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             return e.code, None
+        except ValueError as e:
+            # Not our backend (e.g. a captive portal's HTML): treat it as offline, never crash.
+            raise OSError(f"bad response: {e}") from e
 
     def post(self, path, raw, headers):
         return self._do(urllib.request.Request(self.base + path, data=raw, method="POST",
@@ -324,12 +327,13 @@ class Node:
             self.online = online
 
     def _apply(self, cmd):
-        ok, reason = self.verifier.check(cmd, local_incident_open=self.incident is not None)
+        ok, reason = self.verifier.check(cmd, local_incident_id=self.incident["id"] if self.incident else None)
         if not ok:
             return
         action = cmd["action"]
         if action == "unlock":
             self._write("U")
+            self._queue("local_unlock")
         elif action == "lock":
             self._write("L")
         elif action == "alarm_on":
@@ -387,7 +391,8 @@ def main():
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--stdin", action="store_true", help="read sensor lines from stdin (sim_sensors.py)")
-    src.add_argument("--serial", metavar="PORT", help="Arduino serial port")
+    src.add_argument("--serial", metavar="PORT", nargs="?", const=config.SERIAL_PORT,
+                     help="Arduino serial port (default: SERIAL_PORT from .env)")
     ap.add_argument("--backend", default=config.BACKEND_URL)
     ap.add_argument("--offline", action="store_true", help="never contact the backend")
     ap.add_argument("--exit-on-eof", action="store_true", help="stop once stdin closes and the outbox is empty")
@@ -400,6 +405,8 @@ def main():
     fh.setFormatter(logging.Formatter(fmt))
     logging.getLogger().addHandler(fh)
 
+    if not args.stdin and not args.serial:
+        sys.exit("no serial port: pass --serial PORT or set SERIAL_PORT in .env")
     source = StdinSource() if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
     node = Node(
         device_id=config.DEVICE_ID, secret=config.SHARED_SECRET, nfc_allowed=config.NFC_ALLOWED_UIDS,

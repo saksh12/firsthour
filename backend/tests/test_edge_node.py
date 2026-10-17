@@ -220,11 +220,19 @@ def test_rejected_event_is_dropped_not_retried_forever(node, http, calls):
     assert sum(1 for e in posted(calls) if e["type"] == "fall_suspected") == 1
 
 
-def test_backend_unlock_command_moves_the_servo(node, calls, http, clock):
+def cmd(clock, action, incident_id, secret=SECRET):
+    return make_command(secret, action, incident_id, now_ms=clock.ms()).model_dump()
+
+
+def test_backend_unlock_command_moves_the_servo_and_reports_it(node, calls, http, clock):
     fall(node)
-    http.commands = [make_command(SECRET, "unlock", "inc-1", now_ms=clock.ms()).model_dump()]
+    http.commands = [cmd(clock, "unlock", node.incident["id"])]
     node.tick()
     assert serial(calls)[-1] == "U"
+    clock.advance(1)
+    node.tick()
+    # The dashboard shows the door open only once the Pi says it moved the servo.
+    assert "local_unlock" in [e["type"] for e in posted(calls)]
 
 
 def test_unlock_without_local_incident_refused(node, calls, http, clock):
@@ -235,8 +243,8 @@ def test_unlock_without_local_incident_refused(node, calls, http, clock):
 
 def test_forged_and_replayed_commands_refused(node, calls, http, clock):
     fall(node)
-    good = make_command(SECRET, "unlock", "inc-1", now_ms=clock.ms()).model_dump()
-    forged = make_command("wrong", "unlock", "inc-1", now_ms=clock.ms()).model_dump()
+    good = cmd(clock, "unlock", node.incident["id"])
+    forged = cmd(clock, "unlock", node.incident["id"], secret="wrong")
     http.commands = [forged]
     node.tick()
     assert "U" not in serial(calls)
@@ -248,12 +256,40 @@ def test_forged_and_replayed_commands_refused(node, calls, http, clock):
 
 def test_alarm_off_closes_the_local_incident(node, calls, http, clock):
     fall(node)
-    http.commands = [make_command(SECRET, "alarm_off", "inc-1", now_ms=clock.ms()).model_dump()]
+    http.commands = [cmd(clock, "alarm_off", node.incident["id"])]
     node.tick()
     assert node.incident is None
     assert serial(calls)[-2:] == ["A0", "D,READY"]
     node.handle_line(f"N,{ENROLLED}")
     assert "U" not in serial(calls)
+
+
+def test_commands_for_a_stale_backend_incident_are_ignored(node, calls, http, clock):
+    # Issue #13 bug 2, reproduced live: resolving a stale backend incident silenced a new fall.
+    fall(node)
+    http.commands = [cmd(clock, "alarm_off", "bath-01-1"), cmd(clock, "unlock", "bath-01-1")]
+    node.tick()
+    assert node.incident is not None
+    assert "A0" not in serial(calls) and "U" not in serial(calls)
+    node.handle_line(f"N,{ENROLLED}")
+    assert serial(calls)[-1] == "U"  # offline NFC unlock still armed
+
+
+def test_non_json_response_counts_as_offline_not_a_crash(node, calls, clock, monkeypatch):
+    # A captive portal answers 200 with HTML.
+    from edge.sensor_node import UrlHttp
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"<html>Sign in to Wi-Fi</html>"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: Resp())
+    node.http = UrlHttp("http://backend", 1)
+    fall(node)
+    node.tick()
+    assert node.online is False and len(node.outbox) == 1 and node.incident
 
 
 def test_local_incident_expires_after_the_window(node, calls, clock):
