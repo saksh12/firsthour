@@ -2,7 +2,9 @@
   "name": "comms-gateway",
   "version": "0.1.0",
   "private": true,
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "description": "FirstHour Photon gateway (Role C): caregiver alert text out, reply in.",
   "scripts": {
@@ -12,13 +14,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
-  "optionalDependencies": {
-    "@photon-ai/api": "^0.1.0"
-  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "@photon-ai/api": "0.5.0"
   }
 }
