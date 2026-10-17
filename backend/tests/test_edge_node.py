@@ -8,7 +8,6 @@ from app.security import make_command, verify_event
 from conftest import SECRET
 from edge.sensor_node import AccelDelta, Fusion, Node, Outbox, parse_line
 
-ENROLLED = "04A1B2C3D4"
 QUIET = "S,{ms},20,0.00,0.00,1.00,120"
 THUD = "S,{ms},850,0.80,0.50,2.60,28"     # sound + vibration together
 CLAP = "S,{ms},850,0.00,0.00,1.00,120"    # sound only
@@ -22,12 +21,12 @@ def test_parse_sample():
         "kind": "S", "ms": 1200, "sound": 812, "ax": 0.1, "ay": 0.2, "az": 1.9, "dist": 28}
 
 
-@pytest.mark.parametrize("line,kind", [("N,04A1B2C3D4", "N"), ("B", "B"), ("ACK,U", "ACK")])
+@pytest.mark.parametrize("line,kind", [("B", "B"), ("ACK,U", "ACK")])
 def test_parse_other_kinds(line, kind):
     assert parse_line(line)["kind"] == kind
 
 
-@pytest.mark.parametrize("line", ["", "garbage", "S,1,2,3", "S,a,b,c,d,e,f", "N,", "S,1,2,3,4,5,6,7", "\x00\xff"])
+@pytest.mark.parametrize("line", ["", "garbage", "S,1,2,3", "S,a,b,c,d,e,f", "N,04A1B2C3D4", "S,1,2,3,4,5,6,7", "\x00\xff"])
 def test_noise_is_ignored(line):
     assert parse_line(line) is None
 
@@ -114,7 +113,7 @@ def http(calls):
 
 @pytest.fixture
 def node(tmp_path, clock, calls, http):
-    return Node(device_id="bath-01", secret=SECRET, nfc_allowed=ENROLLED,
+    return Node(device_id="bath-01", secret=SECRET,
                 write_serial=lambda c: calls.append(("SERIAL", c)), http=http,
                 outbox_path=tmp_path / "outbox.jsonl", clock=clock,
                 sound_t=400, accel_t=1.0, window_ms=400, cooldown_s=30,
@@ -190,16 +189,15 @@ def test_offline_alarm_still_works_and_events_wait_in_the_outbox(node, calls, ht
     node.tick()
     assert not any(c[0] in ("POST", "GET") for c in calls[n:])
 
-    # offline NFC unlock works
-    node.handle_line(f"N,{ENROLLED}")
-    assert serial(calls)[-1] == "U"
+    # help button while offline: still queued, in order
+    node.handle_line("B")
 
     # network returns: everything replays in order, then the outbox is empty
     http.online = True
     clock.advance(5)
     node.tick()
     types = [e["type"] for e in posted(calls) if e["type"] != "heartbeat"]
-    assert types[-3:] == ["fall_suspected", "nfc_tap", "local_unlock"]
+    assert types[-2:] == ["fall_suspected", "help_button"]
     assert len(node.outbox) == 0
 
 
@@ -260,8 +258,6 @@ def test_alarm_off_closes_the_local_incident(node, calls, http, clock):
     node.tick()
     assert node.incident is None
     assert serial(calls)[-2:] == ["A0", "D,READY"]
-    node.handle_line(f"N,{ENROLLED}")
-    assert "U" not in serial(calls)
 
 
 def test_commands_for_a_stale_backend_incident_are_ignored(node, calls, http, clock):
@@ -271,8 +267,6 @@ def test_commands_for_a_stale_backend_incident_are_ignored(node, calls, http, cl
     node.tick()
     assert node.incident is not None
     assert "A0" not in serial(calls) and "U" not in serial(calls)
-    node.handle_line(f"N,{ENROLLED}")
-    assert serial(calls)[-1] == "U"  # offline NFC unlock still armed
 
 
 def test_non_json_response_counts_as_offline_not_a_crash(node, calls, clock, monkeypatch):
@@ -299,22 +293,6 @@ def test_local_incident_expires_after_the_window(node, calls, clock):
     assert node.incident is None and serial(calls)[-1] == "D,READY"
 
 
-@pytest.mark.parametrize("uid,incident,unlocks", [
-    (ENROLLED, True, True),      # case 11
-    ("DEADBEEF", True, False),   # case 10
-    (ENROLLED, False, False),    # case 12
-])
-def test_nfc_cases(node, calls, uid, incident, unlocks):
-    if incident:
-        fall(node)
-    node.handle_line(f"N,{uid}")
-    assert ("U" in serial(calls)) is unlocks
-    node.tick()
-    types = [e["type"] for e in posted(calls)]
-    assert "nfc_tap" in types
-    assert ("local_unlock" in types) is unlocks
-
-
 def test_help_button_with_no_incident_opens_one_and_asks_for_help(node, calls):
     node.handle_line("B")
     assert node.incident and "A1" in serial(calls)
@@ -332,5 +310,5 @@ def test_second_fall_during_incident_keeps_the_same_incident(node, clock):
 
 def test_missing_secret_refuses_to_start(tmp_path):
     with pytest.raises(ValueError):
-        Node(device_id="x", secret="", nfc_allowed="", write_serial=print, http=None,
+        Node(device_id="x", secret="", write_serial=print, http=None,
              outbox_path=tmp_path / "o.jsonl")

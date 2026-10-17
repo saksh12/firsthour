@@ -243,7 +243,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             machine.on_help_button()
         elif event.type == "cancelled":
             machine.cancel("cancelled on device")
-        # nfc_tap / local_unlock: the Pi already decided; we only log and show them.
+        # local_unlock: the Pi opened the latch; we only log and show it.
         inc = machine.incident
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 

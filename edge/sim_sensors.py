@@ -6,11 +6,10 @@
 Interactive (type a letter, then Enter):
     f  fall (thud + floor vibration together)     c  clap (sound only)
     s  stomp (vibration only)                      b  help button
-    n  enrolled NFC tag (first of NFC_ALLOWED_UIDS) u  unknown NFC tag
     q  quit
 
 Scripted, for repeatable runs:
-    python3 edge/sim_sensors.py --script "clap@1,fall@2,nfc@6" --duration 8
+    python3 edge/sim_sensors.py --script "clap@1,stomp@2,fall@3" --duration 8
 
 The numbers here are made up to exercise the code. They are NOT calibration data.
 """
@@ -27,12 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from edge import config  # noqa: E402
 
 SAMPLE_S = 0.05
-UNKNOWN_UID = "DEADBEEF"
-
-
-def enrolled_uid():
-    uids = [u.strip() for u in config.NFC_ALLOWED_UIDS.split(",") if u.strip()]
-    return uids[0] if uids else "04A1B2C3D4"
 
 
 class FakeArduino:
@@ -60,10 +53,6 @@ class FakeArduino:
             self.pending.append(("accel", None))
         elif event == "button":
             self.emit("B")
-        elif event == "nfc":
-            self.emit(f"N,{enrolled_uid()}")
-        elif event == "unknown":
-            self.emit(f"N,{UNKNOWN_UID}")
         else:
             print(f"sim: unknown event {event!r}", file=sys.stderr)
 
@@ -81,7 +70,7 @@ class FakeArduino:
         self.emit(f"S,{self.ms()},{sound},{ax:.2f},{ay:.2f},{az:.2f},{dist}")
 
 
-KEYS = {"f": "fall", "": "fall", "c": "clap", "s": "stomp", "b": "button", "n": "nfc", "u": "unknown"}
+KEYS = {"f": "fall", "": "fall", "c": "clap", "s": "stomp", "b": "button"}
 
 
 def parse_script(text):
@@ -94,7 +83,7 @@ def parse_script(text):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--script", help='e.g. "clap@1,fall@2,nfc@6"')
+    ap.add_argument("--script", help='e.g. "clap@1,stomp@2,fall@3"')
     ap.add_argument("--duration", type=float, help="stop after this many seconds")
     args = ap.parse_args()
 

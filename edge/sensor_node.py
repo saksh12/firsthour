@@ -2,7 +2,7 @@
 """The Pi's safety node (IMPLEMENTATION.md sections 6.1-6.3, 9.3, 10). Stdlib only.
 
 Reads the Arduino's serial lines, runs two-sensor fusion, owns the local incident
-(buzzer + TIME DOWN clock + offline NFC unlock), posts signed events to the backend,
+(buzzer + TIME DOWN clock), posts signed events to the backend,
 and polls and verifies signed commands.
 
 Rule: safety never waits on the network. handle_line() only touches the Arduino and
@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from edge import config  # noqa: E402
-from edge.security import CommandVerifier, nfc_unlock_allowed, sign_event  # noqa: E402
+from edge.security import CommandVerifier, sign_event  # noqa: E402
 
 log = logging.getLogger("firsthour.edge")
 
@@ -44,8 +44,6 @@ def parse_line(line):
             return {"kind": "S", "ms": int(parts[1]), "sound": int(float(parts[2])),
                     "ax": float(parts[3]), "ay": float(parts[4]), "az": float(parts[5]),
                     "dist": int(float(parts[6]))}
-        if kind == "N" and len(parts) == 2 and parts[1].strip():
-            return {"kind": "N", "uid": parts[1].strip()}
         if kind == "B" and len(parts) == 1:
             return {"kind": "B"}
         if kind == "ACK" and len(parts) == 2:
@@ -181,14 +179,14 @@ def format_down(seconds):
 
 
 class Node:
-    def __init__(self, *, device_id, secret, nfc_allowed, write_serial, http, outbox_path,
+    def __init__(self, *, device_id, secret, write_serial, http, outbox_path,
                  clock=time.time, sound_t=config.SOUND_THRESHOLD, accel_t=config.ACCEL_THRESHOLD_G,
                  window_ms=config.FUSION_WINDOW_MS, cooldown_s=config.COOLDOWN_S,
                  incident_window_s=config.INCIDENT_WINDOW_SECONDS, poll_s=config.POLL_S,
                  heartbeat_s=config.HEARTBEAT_S, backoff_s=config.OFFLINE_BACKOFF_S):
         if not secret:
             raise ValueError("SHARED_SECRET is not set")
-        self.device_id, self.secret, self.nfc_allowed = device_id, secret, nfc_allowed
+        self.device_id, self.secret = device_id, secret
         self._write = write_serial
         self.http = http  # None = offline mode (never contact the backend)
         self._clock = clock
@@ -221,8 +219,6 @@ class Node:
                 log.warning("FALL SUSPECTED sound=%s accel_delta_g=%.2f dist_cm=%s",
                             msg["sound"], delta, msg["dist"])
                 self._on_fall(sensors)
-        elif kind == "N":
-            self._on_nfc(msg["uid"])
         elif kind == "B":
             log.info("help button pressed")
             if not self.incident:
@@ -262,13 +258,6 @@ class Node:
         self.incident = None
         self._write("A0")
         self._show("READY")
-
-    def _on_nfc(self, uid):
-        ok, reason = nfc_unlock_allowed(uid, self.nfc_allowed, local_incident_open=self.incident is not None)
-        self._queue("nfc_tap")
-        if ok:
-            self._write("U")
-            self._queue("local_unlock")
 
     def _show(self, text):
         if text != self._display:
@@ -409,7 +398,7 @@ def main():
         sys.exit("no serial port: pass --serial PORT or set SERIAL_PORT in .env")
     source = StdinSource() if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
     node = Node(
-        device_id=config.DEVICE_ID, secret=config.SHARED_SECRET, nfc_allowed=config.NFC_ALLOWED_UIDS,
+        device_id=config.DEVICE_ID, secret=config.SHARED_SECRET,
         write_serial=source.write,
         http=None if args.offline else UrlHttp(args.backend, config.HTTP_TIMEOUT_S),
         outbox_path=config.LOG_DIR / "outbox.jsonl",

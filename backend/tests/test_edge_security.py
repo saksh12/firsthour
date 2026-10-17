@@ -1,7 +1,7 @@
-"""Pi side of the unlock suite (IMPLEMENTATION.md section 9.4, cases 7-12 and 14).
+"""Pi side of the unlock suite (IMPLEMENTATION.md section 9.4, cases 7-9 and 11).
 
-Case 13 (servo relocks after hold time) lives in the Arduino sketch and has to be
-checked on the hardware.
+Case 10 (the latch relocks after the hold time) lives in the Arduino sketch and has
+to be checked on the hardware.
 """
 
 import logging
@@ -10,7 +10,7 @@ import pytest
 
 from app.security import make_command
 from conftest import SECRET
-from edge.security import CommandVerifier, nfc_unlock_allowed
+from edge.security import CommandVerifier
 
 
 @pytest.fixture
@@ -93,35 +93,12 @@ def test_nonce_cache_stays_bounded(verifier, clock):
     assert len(verifier._seen) <= 25  # only nonces still inside 2x the freshness window
 
 
-ENROLLED = "04A1B2C3D4"
-
-
-def test_10_unknown_nfc_tag_during_incident_refused():
-    assert nfc_unlock_allowed("DEADBEEF", [ENROLLED], local_incident_open=True) == (False, "unknown tag")
-
-
-def test_11_enrolled_nfc_tag_during_incident_unlocks():
-    assert nfc_unlock_allowed(ENROLLED, [ENROLLED], local_incident_open=True) == (True, "ok")
-
-
-def test_11b_uid_format_is_normalized():
-    assert nfc_unlock_allowed("04:a1:b2:c3:d4", "04a1b2c3d4", local_incident_open=True)[0]
-
-
-def test_12_enrolled_nfc_tag_with_no_incident_refused():
-    assert nfc_unlock_allowed(ENROLLED, [ENROLLED], local_incident_open=False) == (False, "no local incident")
-
-
-def test_empty_nfc_allowlist_refuses_everything():
-    assert nfc_unlock_allowed("", "", local_incident_open=True) == (False, "unknown tag")
-
-
 def test_14_edge_logs_every_decision_with_reason(verifier, clock, caplog):
     caplog.set_level(logging.INFO, logger="firsthour.edge.security")
     cmd = unlock_cmd(clock)
     verifier.check(cmd, local_incident_id="inc-1")
     verifier.check(cmd, local_incident_id="inc-1")
-    nfc_unlock_allowed("DEADBEEF", [ENROLLED], local_incident_open=True)
+    verifier.check(unlock_cmd(clock), local_incident_id=None)
     lines = [r.getMessage() for r in caplog.records if r.name == "firsthour.edge.security"]
     assert len(lines) == 3
-    assert "ok" in lines[0] and "replay" in lines[1] and "unknown tag" in lines[2]
+    assert "ok" in lines[0] and "replay" in lines[1] and "no local incident" in lines[2]

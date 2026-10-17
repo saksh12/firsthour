@@ -72,21 +72,3 @@ class CommandVerifier:
         for nonce in [n for n, ts in self._seen.items() if ts < cutoff]:
             del self._seen[nonce]
 
-
-def _norm_uid(uid):
-    return uid.replace(":", "").replace(" ", "").upper()
-
-
-def nfc_unlock_allowed(uid, allowed_uids, local_incident_open):
-    """Offline unlock: an enrolled tag works only while a local incident is open."""
-    if isinstance(allowed_uids, str):
-        allowed_uids = allowed_uids.split(",")
-    allowed = {_norm_uid(u) for u in allowed_uids if u and u.strip()}
-    if not local_incident_open:
-        ok, reason = False, "no local incident"
-    elif not uid or _norm_uid(uid) not in allowed:
-        ok, reason = False, "unknown tag"
-    else:
-        ok, reason = True, "ok"
-    log.info("nfc_tap uid=%s accepted=%s reason=%s", _norm_uid(uid or ""), ok, reason)
-    return ok, reason

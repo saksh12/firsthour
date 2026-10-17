@@ -218,7 +218,6 @@ button:disabled { opacity: .5; cursor: default; }
 
   let view = blank();
   let localUnlockUntil = 0;
-  let unlockedBy = null;
 
   function blank() {
     return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], triage: null, asking: null };
@@ -274,7 +273,7 @@ button:disabled { opacity: .5; cursor: default; }
     $("door-panel").style.color = t.color;
     $("door-state").textContent = open ? "Unlocked" : sent ? "Unlocking…" : "Locked";
     $("door-note").textContent = open
-      ? (unlockedBy === "caregiver" ? "Unlocked by the caregiver. Relocks automatically." : "Unlocked on the device by an enrolled NFC tag.")
+      ? "Unlocked by the caregiver. Relocks automatically."
       : sent ? "Unlock granted. Waiting for the door to confirm."
       : "Opens only for an enrolled caregiver with the one-time code.";
     $("shackle").setAttribute("d", open ? "M34 44 V30 a14 14 0 0 1 28 0 V22" : "M34 44 V30 a14 14 0 0 1 28 0 V44");
@@ -398,10 +397,7 @@ button:disabled { opacity: .5; cursor: default; }
         log((d.allowed ? "Unlock granted for " : "Unlock refused for ") + d.sender + (d.allowed ? "" : " · " + d.reason));
         break;
       case "device_status":
-        if (d.event === "local_unlock") {
-          localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS;
-          unlockedBy = view.state === "UNLOCKED" ? "caregiver" : "nfc";
-        }
+        if (d.event === "local_unlock") localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS;
         log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
         break;
     }

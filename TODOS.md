@@ -5,7 +5,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 ## Phase 0: Setup and verification (until 3:00 PM Sat)
 
 - [ ] (All) Agree on roles; put names on Q1–Q10 in `IMPLEMENTATION.md` section 2
-- [ ] (A) Collect hardware + craft supplies; record accelerometer chip, NFC board, Grove shield (Q7)
+- [ ] (A) Collect hardware + craft supplies; record accelerometer chip, Grove shield (Q7)
 - [ ] (A) QNX table: board image, flashing, `oss.qnx.com` AI module, audio capture (Q2)
 - [ ] (B) StepFun key works with one call; record the matching base URL (Q4)
 - [ ] (B) FastAPI skeleton: `/health`, `models.py` contracts, `STUB_*` switches
@@ -34,12 +34,10 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Phase 2: Hardware bring-up (3:00 to 7:00 PM, parallel)
 
-- [ ] (A) Servo test + tune `LOCK_DEG` / `UNLOCK_DEG`
-- [ ] (A) Lock prop, 10 unlocks in a row
+- [ ] (A) Simulated latch: `U` lights the latch LED, `ACK,U`, relocks after the hold time (no servo)
 - [ ] (A) Sound sensor readings noted
 - [ ] (A) Accelerometer readings noted
 - [ ] (A) Ultrasonic readings noted
-- [ ] (A) NFC UIDs recorded
 - [ ] (A) Buzzer + display by command
 - [ ] (A) QNX: shell + read Arduino serial from a script
 - [x] (A) `sensor_node.py` fusion, tested with `sim_sensors.py`

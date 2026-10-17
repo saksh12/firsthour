@@ -258,8 +258,8 @@ class IncidentMachine:
     def _finish(self, final: S, reason: str) -> None:
         self._set(final, reason)
         self.guard.close_incident()
-        # Tell the Pi before forgetting the incident, so its buzzer, clock and
-        # offline NFC unlock don't stay live until the local window runs out.
+        # Tell the Pi before forgetting the incident, so its buzzer and clock
+        # don't stay live until the local window runs out.
         self._on_close(self.incident, final)
         self.incident = None
         self._emit("incident_update", {"state": S.IDLE.value, "incident_id": None, "reason": "reset"})
