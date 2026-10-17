@@ -52,6 +52,8 @@ class IncidentMachine:
         speak: Callable[[str], None] = _noop,
         send_alert: Callable[[str, str], None] = _noop,
         on_close: Callable[[Incident, S], None] = _noop,
+        triage_fn: Callable[[list, dict], TriageRecord] = parse_rules,
+        rewrite_fn: Callable[[str], str] = lambda text: text,
     ):
         self.guard = guard
         self.profile = profile
@@ -62,6 +64,8 @@ class IncidentMachine:
         self._speak = speak
         self._send_alert = send_alert
         self._on_close = on_close
+        self._triage_fn = triage_fn  # StepFun with rule fallback, or rules only
+        self._rewrite_fn = rewrite_fn
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
 
@@ -146,11 +150,13 @@ class IncidentMachine:
             log.info("caregiver message with no incident sender=%s", sender)
             return {"type": "message", "accepted": False, "reason": "no active incident"}
 
-        self._emit("message_in", {"sender": sender, "text": text, "incident_id": self.incident.id})
+        spoken = self._rewrite_fn(text)
+        # Both versions go to the dashboard, so the operator can see what the AI changed.
+        self._emit("message_in", {"sender": sender, "text": text, "spoken": spoken,
+                                  "incident_id": self.incident.id})
         if self.incident.state == S.ALERTING:
             self._set(S.RESPONDING, "caregiver replied")
-        # TODO(phase 3, B/C): StepFun rewrite to one calm sentence, falling back to the original.
-        self._speak(text)
+        self._speak(spoken)
         return {"type": "message", "accepted": True}
 
     def resolve(self, by: str = "caregiver") -> bool:
@@ -193,7 +199,7 @@ class IncidentMachine:
 
     def _update_triage(self) -> None:
         inc = self.incident
-        inc.triage = parse_rules(inc.answers, self.profile)
+        inc.triage = self._triage_fn(inc.answers, self.profile)
         self._emit("triage_update", {"incident_id": inc.id, "triage": inc.triage.model_dump(),
                                      "transcript": [a for _, a in inc.answers]})
 

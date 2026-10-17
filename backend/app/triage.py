@@ -3,14 +3,29 @@
 The rules only structure what the person said. They never diagnose or advise,
 and they never guess: anything not said stays None.
 
-TODO(phase 3, B): StepFun `parse_answers` path with a 3 s timeout that falls back
-to `parse_rules` on timeout, bad JSON or validation failure.
+StepFun path (section 11.3/11.4): `StepFun.triage` asks step-5-preview to structure
+the answers, with a hard 3 s deadline, and falls back to `parse_rules` on stub mode,
+missing key, timeout, HTTP error, bad JSON or a record that fails validation.
+`StepFun.rewrite` turns a caregiver reply into one calm sentence, falling back to the
+original text. The question script, next_question/done and on_blood_thinner never
+come from the model.
 """
 
+import json
+import logging
 import re
-from typing import Optional
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import Callable, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .models import TriageRecord
+
+log = logging.getLogger("firsthour.triage")
 
 # The fixed question script (section 11.2). Never generate questions.
 QUESTIONS: list[tuple[str, str]] = [
@@ -138,3 +153,154 @@ def summarize(rec: TriageRecord, include_meds: bool = True) -> str:
     if include_meds and rec.on_blood_thinner:
         parts.append("On a blood thinner.")
     return " ".join(parts)
+
+
+# --- StepFun (step-5-preview) ----------------------------------------------------
+
+TRIAGE_SYSTEM = """You turn short spoken answers from a person who may have fallen into a JSON record.
+Rules:
+- Output ONLY a JSON object with keys: conscious, head_strike, pain_location, can_move, bleeding, summary.
+- conscious, head_strike, can_move, bleeding are true, false or null. pain_location is a short body part or null.
+- Use null when the answers do not say. Never guess or invent.
+- Do not give medical advice or diagnoses.
+- summary: one plain sentence for a paramedic, using only what was said."""
+
+REWRITE_SYSTEM = (
+    "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud "
+    "to someone who has fallen. Do not add information. Output only the sentence."
+)
+
+MAX_REWRITE_WORDS = 20
+
+# Transport: (url, headers, body_dict, timeout_s) -> parsed JSON response. Injectable for tests.
+Transport = Callable[[str, dict, dict, float], dict]
+
+
+def urllib_transport(url: str, headers: dict, body: dict, timeout: float) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+class ModelTriage(BaseModel):
+    """What we accept from the model. Anything else (wrong types, missing summary) is a failure."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+    conscious: Optional[bool] = None
+    head_strike: Optional[bool] = None
+    pain_location: Optional[str] = Field(default=None, max_length=40)
+    can_move: Optional[bool] = None
+    bleeding: Optional[bool] = None
+    summary: str = Field(min_length=1, max_length=300)
+
+
+class StepFunError(Exception):
+    pass
+
+
+def transcript_text(answers: list[tuple[str, str]]) -> str:
+    return "\n".join(f"Q: {QUESTION_TEXT[k]}\nA: {a}" for k, a in answers)
+
+
+def _strip_fences(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    return t
+
+
+class StepFun:
+    def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
+                 stub: bool = True, timeout_s: float = 3.0, transport: Transport = urllib_transport):
+        self.enabled = not stub and bool(api_key) and bool(base_url)
+        if not stub and not self.enabled:
+            log.warning("STUB_STEPFUN=0 but STEPFUN_API_KEY/STEPFUN_BASE_URL missing; using rules only")
+        self.api_key, self.model = api_key, model
+        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.timeout_s = timeout_s
+        self._transport = transport
+        # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
+
+    def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int) -> str:
+        body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            # TODO(verify): StepFun docs for a low-reasoning-effort parameter on step-5-preview.
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}  # TODO(verify) supported on our key
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        fut = self._pool.submit(self._transport, self.url, headers, body, self.timeout_s)
+        try:
+            data = fut.result(timeout=self.timeout_s)
+        except FutureTimeout:
+            raise StepFunError("timeout")
+        except urllib.error.HTTPError as e:
+            raise StepFunError(f"http {e.code}")
+        except (urllib.error.URLError, OSError) as e:
+            raise StepFunError(f"network: {e}")
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise StepFunError("unexpected response shape")
+
+    def triage(self, answers: list[tuple[str, str]], profile: dict) -> TriageRecord:
+        rules = parse_rules(answers, profile)
+        if not self.enabled or not answers:
+            return rules
+        t0 = time.monotonic()
+        try:
+            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=300)
+            try:
+                raw = json.loads(_strip_fences(content))
+            except ValueError:
+                raise StepFunError("bad json")
+            if not isinstance(raw, dict):
+                raise StepFunError("bad json")
+            try:
+                m = ModelTriage.model_validate(raw)
+            except ValidationError as e:
+                raise StepFunError(f"invalid record ({e.error_count()} errors)")
+        except StepFunError as e:
+            self._log("triage", t0, False, str(e))
+            return rules
+        self._log("triage", t0, True, None)
+        return TriageRecord(
+            conscious=m.conscious, head_strike=m.head_strike, pain_location=m.pain_location,
+            can_move=m.can_move, bleeding=m.bleeding, summary=m.summary,
+            # Never from the model:
+            on_blood_thinner=profile.get("on_blood_thinner"),
+            next_question=rules.next_question, done=rules.done,
+        )
+
+    def rewrite(self, text: str) -> str:
+        if not self.enabled or not text.strip():
+            return text
+        t0 = time.monotonic()
+        try:
+            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=60).strip().strip('"')
+            if not out:
+                raise StepFunError("empty")
+            if len(out.split()) > MAX_REWRITE_WORDS:
+                raise StepFunError("too long")
+            # "Do not add information": a number the caregiver didn't write is a red flag.
+            if set(re.findall(r"\d+", out)) - set(re.findall(r"\d+", text)):
+                raise StepFunError("added numbers")
+        except StepFunError as e:
+            self._log("rewrite", t0, False, str(e))
+            return text
+        self._log("rewrite", t0, True, None)
+        return out
+
+    def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str]) -> None:
+        ms = int((time.monotonic() - t0) * 1000)
+        if ok:
+            log.info("stepfun call=%s model=%s ms=%d ok=True", call, self.model, ms)
+        else:
+            log.warning("stepfun call=%s model=%s ms=%d ok=False fallback=rules reason=%s",
+                        call, self.model, ms, fallback_reason)
