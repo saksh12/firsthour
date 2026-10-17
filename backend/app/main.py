@@ -1,7 +1,7 @@
-"""FastAPI app: /health, the edge contract, the person's answers, and caregiver inbound.
+"""FastAPI app: /health, the edge contract, the person's answers, caregiver inbound,
+and the dashboard WebSocket (section 6.7).
 
-TODO(phase 1): dashboard WebSocket (section 6.7) streams `app.state.events`;
-voice.py replaces `speak`; comms-gateway replaces the stub outbox.
+TODO(phase 1, C): voice.py replaces `speak`; comms-gateway replaces the stub outbox.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -28,6 +28,7 @@ log = logging.getLogger("firsthour.api")
 
 HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
+WS_QUEUE_MAX = 200
 DEFAULT_SECRET = "change-me-before-demo"
 
 
@@ -61,8 +62,27 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     outbox: list[dict] = []
     spoken: deque = deque(maxlen=100)
 
+    clients: set[asyncio.Queue] = set()
+    loop_ref: dict = {"loop": None}
+
     def emit(type_: str, data: dict) -> None:
-        events.append(DashboardEvent(type=type_, data=data))
+        ev = DashboardEvent(type=type_, data=data)
+        events.append(ev)
+        loop = loop_ref["loop"]
+        if loop is None:
+            return
+        # emit() runs in the event loop (ticker, async routes) or a worker thread (sync
+        # routes), so always hand off through the loop.
+        for q in list(clients):
+            loop.call_soon_threadsafe(_offer, q, ev)
+
+    def _offer(q: asyncio.Queue, ev: DashboardEvent) -> None:
+        try:
+            q.put_nowait(ev)
+        except asyncio.QueueFull:
+            # A stuck dashboard tab must never slow the incident flow; drop it.
+            clients.discard(q)
+            log.warning("dashboard client dropped, queue full")
 
     def speak(text: str) -> None:
         # TODO(C): voice.py plays cached ElevenLabs audio here.
@@ -97,6 +117,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app):
+        loop_ref["loop"] = asyncio.get_running_loop()
         async def ticker():
             while True:
                 try:
@@ -108,6 +129,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         task = asyncio.create_task(ticker())
         yield
         task.cancel()
+        loop_ref["loop"] = None
 
     app = FastAPI(title="FirstHour backend", lifespan=lifespan)
     app.state.guard, app.state.machine = guard, machine
@@ -171,6 +193,29 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     @app.post("/incident/resolve")
     def resolve():
         return {"resolved": machine.resolve("operator"), **machine.snapshot()}
+
+    @app.websocket("/ws/dashboard")
+    async def ws_dashboard(ws: WebSocket):
+        """Live events for the dashboard. The first message is a full incident snapshot
+        (as an incident_update), then every event in section 6.7 as it happens.
+        Nothing sent here contains the unlock code."""
+        await ws.accept()
+        q: asyncio.Queue = asyncio.Queue(maxsize=WS_QUEUE_MAX)
+        clients.add(q)
+        log.info("dashboard connected clients=%d", len(clients))
+        try:
+            await ws.send_json({"type": "incident_update", "data": {"snapshot": True, **machine.snapshot()}})
+            while q in clients:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue  # recheck: this client may have been dropped
+                await ws.send_json(ev.model_dump())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            clients.discard(q)
+            log.info("dashboard disconnected clients=%d", len(clients))
 
     @app.get("/comms/stub/outbox")
     def stub_outbox():

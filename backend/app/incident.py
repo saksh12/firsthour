@@ -78,6 +78,7 @@ class IncidentMachine:
             "state": inc.state.value,
             "incident_id": inc.id,
             "device_id": inc.device_id,
+            "opened_at_ms": int(inc.opened_at * 1000),  # dashboard runs the clock locally
             "down_s": round(self._clock() - inc.opened_at, 1),
             "current_question": self._current_question(),
             "transcript": [{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
