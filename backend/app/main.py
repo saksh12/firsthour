@@ -15,6 +15,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -30,6 +31,8 @@ HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
 WS_QUEUE_MAX = 200
 DEFAULT_SECRET = "change-me-before-demo"
+# Where the dashboard and caregiver simulator are served from (python3 -m http.server 5173 -d dashboard).
+DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
 
 class PersonAnswer(BaseModel):
@@ -45,11 +48,23 @@ def load_settings() -> dict:
         "CAREGIVER_NUMBERS": os.getenv("CAREGIVER_NUMBERS", ""),
         "INCIDENT_WINDOW_SECONDS": int(os.getenv("INCIDENT_WINDOW_SECONDS", "600")),
         "UNLOCK_HOLD_SECONDS": int(os.getenv("UNLOCK_HOLD_SECONDS", "30")),
+        "CORS_ORIGINS": os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS),
     }
 
 
+def parse_origins(value: str) -> list[str]:
+    origins = [o.strip().rstrip("/") for o in value.split(",") if o.strip()]
+    # A wildcard would let any website open in the operator's browser drive the incident.
+    bad = [o for o in origins if o in ("*", "null")]
+    if bad:
+        raise RuntimeError(f"CORS_ORIGINS must list exact origins, not {bad}")
+    return origins
+
+
 def create_app(settings: Optional[dict] = None) -> FastAPI:
-    s = {"STUB_PHOTON": True, "UNLOCK_HOLD_SECONDS": 30, **(settings or load_settings())}
+    s = {"STUB_PHOTON": True, "UNLOCK_HOLD_SECONDS": 30, "CORS_ORIGINS": DEFAULT_CORS_ORIGINS,
+         **(settings or load_settings())}
+    origins = parse_origins(s["CORS_ORIGINS"])
     secret = s["SHARED_SECRET"]
     if not secret:
         raise RuntimeError("SHARED_SECRET is not set; copy .env.example to .env")
@@ -142,6 +157,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         loop_ref["loop"] = None
 
     app = FastAPI(title="FirstHour backend", lifespan=lifespan)
+    if origins:
+        # The dashboard and simulator are static pages on another port; without this the
+        # browser blocks their POSTs. Exact origins only, no cookies, only what the pages use.
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
+                           allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+        log.info("CORS allowed origins=%s", origins)
     app.state.guard, app.state.machine = guard, machine
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
 
