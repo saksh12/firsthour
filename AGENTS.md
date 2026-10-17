@@ -1,0 +1,280 @@
+# AGENTS.md: FirstHour
+
+Every agent and human on this repo reads this first. `IMPLEMENTATION.md` is the full build plan and `TODOS.md` is the task board. Work from them, update them, and do not drift from the contracts below.
+
+## What we are building
+
+FirstHour is a **camera-free fall-response node** for a bathroom. A Raspberry Pi running QNX plus an Arduino sensor hub hear a fall, check on the person by voice, text a caregiver a triage card, and let help in through a guarded door unlock. It must stay safe with the network gone.
+
+| # | Moment | What judges see and hear | Trigger |
+| --- | --- | --- | --- |
+| M1 | **The thud** | Display flips to `TIME DOWN 00:01`. Terminal shows both sensors spiking | Sound peak + accelerometer spike agree within 400 ms |
+| M2 | **The voice** | Calm synthetic voice: "Are you okay? Say 'I'm fine' or 'I need help.'" Short scripted triage follows | `fall_suspected` event reaches the backend |
+| M3 | **The text** | Caregiver phone buzzes with a triage card. Their reply is read aloud to the person on the floor | Any answer other than a clear "I'm fine", or 8 s of silence |
+| M4 | **The door** | Caregiver replies `UNLOCK <code>`, servo clicks the latch open. A stranger's text is refused | Every unlock rule passes (see below) |
+| M5 | **The offline test** | Wi-Fi unplugged: box still alarms, clock still counts, enrolled NFC tag unlocks | Local incident open on the Pi |
+
+The pitch rests on **local safety, cloud convenience**: detection, alarm, signature checks and NFC unlock live on the Pi. The cloud can ask; **the Pi decides**. Never move safety logic off the Pi.
+
+Hackathon: LA Hacks 2026, UCLA. Hacking runs **Sat Oct 17 to Sun Oct 18, 12:00 PM**. Code freeze **Sun 8:30 AM** (tag `demo-ready`). Submit on Devpost by **11:00 AM**.
+
+## Sponsor targets and their hard requirements
+
+Every sponsor below has a real job in the pipeline. If a change would break one of these requirements, stop and flag it.
+
+| Sponsor | Requirement to qualify | Our usage |
+| --- | --- | --- |
+| **Main track**: Beyond the Digital | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, servo latch, NFC |
+| **QNX** | Product runs on **QNX OS** and includes **one open-source AI module from `oss.qnx.com`** | `edge/` on the Pi. Module: `TODO(verify)` at the QNX table. **Gate 1 at 7:00 PM Sat**: if QNX isn't booting and reading serial, run `edge/` on Linux and drop this prize |
+| **StepFun**: Get It Done with Step 5 Preview | App **must call `step-5-preview` at runtime**. Explain what every other model does. Judged on task completion, reliability, user understanding and control | Turns spoken answers into the triage record, writes the handoff summary, rewrites caregiver replies into one calm sentence |
+| **Photon**: Messaging/Calling Agent | Build on **Photon 2.0 beta** | `comms-gateway/`: alert text out, caregiver reply in. Voice calls only if confirmed available (`TODO(verify)`) |
+| **Sentry**: Best Use of Sentry | **≥2 products beyond error monitoring**, and show how they shaped the build | Tracing (one trace per incident), Uptime Monitoring (`/health` via tunnel), Logs (unlock audit trail), Session Replay optional |
+| **MLH**: Best Use of ElevenLabs | Use ElevenLabs | TTS for every fixed phrase (pre-cached), plus STT if our tier supports it |
+| **Paper** *or* **Base44** (pick one) | Paper: design craft. Base44: real problem, usable product | `dashboard/`. Decide by 3:00 PM Sat, do not chase both |
+| **Cognition**: Best Use of Devin (optional) | Build with Devin | Only claim it if Devin actually built something; note what |
+
+Read each sponsor's "View Additional Information" page for extra rules or forms. Requirements can change.
+
+## Hardware and platform facts (assumed; confirm and update this section)
+
+Nothing here is verified yet. Whoever confirms a fact replaces the `TODO(verify)` with what they saw and where.
+
+- **The Pi never reads sensors directly.** The Grove sound sensor is analog, and Grove/GPIO drivers on QNX are a time sink. The Arduino reads everything and talks to the Pi over **USB serial at 115200 baud**.
+- **The Pi polls the backend; it never accepts inbound connections.** No port or firewall problems on venue Wi-Fi.
+- **Venue Wi-Fi may isolate clients.** Have a phone hotspot set up and tested before you need it.
+- QNX board image, flashing steps, Python runtime on QNX, and serial device path: `TODO(verify)` at the QNX table.
+- Accelerometer chip, NFC board type (I2C vs UART), Grove shield, display type: `TODO(verify)`, read the module labels.
+- Photon: does an inbound reply carry the **sender's number**? Are **outbound calls** supported? `TODO(verify)`. Without the sender number, the unlock demo runs on the caregiver simulator.
+- StepFun base URL depends on the key: `https://api.stepfun.com/v1` or `https://api.stepfun.ai/v1`. **Never hardcode either.**
+- ElevenLabs voice cloning and realtime STT on our tier: `TODO(verify)`. Fallback is a stock voice and browser Web Speech API.
+- Servo on USB power can brown out the Arduino. If it jitters or resets, use a separate 5V supply with a shared ground.
+
+Docs: `docs.photon.codes/docs/llms.txt` (Photon index) · `oss.qnx.com` (QNX modules) · StepFun, ElevenLabs and Sentry developer docs for exact parameter names.
+
+## Architecture
+
+```text
+ FLOOR / BATHROOM                       PI ON QNX (edge/)                       LAPTOP (backend/)                 OUTSIDE WORLD
+┌───────────────────────┐ USB serial ┌──────────────────────────────┐  HTTP   ┌──────────────────────────────┐
+│ arduino/hub           │◀──────────▶│ sensor_node.py               │────────▶│ FastAPI                       │──▶ StepFun step-5-preview
+│ • sound (A0)          │  lines     │ • fusion (sound + accel)     │ events  │ • incident state machine      │──▶ ElevenLabs TTS / STT
+│ • accelerometer (I2C) │            │ • local incident + clock     │◀────────│ • triage (StepFun + rules)    │──▶ Sentry
+│ • ultrasonic (D7)     │            │ • buzzer + TIME DOWN display │ polled  │ • voice (cached audio)        │
+│ • NFC                 │            │ • verifies SIGNED commands   │ signed  │ • unlock rules + signing      │
+│ • servo latch (D9)    │            │ • offline NFC unlock         │ cmds    │ • /health (503 if Pi silent)  │
+│ • buzzer / LED / LCD  │            │ • local log, replay on recon │         └───────┬──────────────┬────────┘
+└───────────────────────┘            └──────────────────────────────┘                 │              │ ws
+                                                                       ┌─────────────▼──────┐ ┌─────▼──────────────────┐
+                                                                       │ comms-gateway/     │ │ dashboard/             │
+                                                                       │ Node + Photon SDK  │ │ live incident, clock,  │
+                                                                       │ alert out, reply in│ │ triage + transcript,   │
+                                                                       └─────────┬──────────┘ │ handoff sheet,         │
+                                                                                 ▼            │ caregiver simulator    │
+                                                                         caregiver's phone    └────────────────────────┘
+```
+
+Key decisions (already made; don't relitigate):
+
+1. **Arduino = sensors and actuators. Pi = safety brain. Laptop = AI and comms.** The Pi never needs StepFun, ElevenLabs, Photon or Sentry to stay safe.
+2. **The backend never touches hardware.** It queues signed commands. The Pi verifies and acts.
+3. **The Pi polls `GET /edge/commands` every second.** No inbound connections to the Pi.
+4. **Two sensors must agree** (sound + accelerometer within 400 ms). Ultrasonic only adds confidence; never require it.
+5. **Silence escalates.** Only a clear "I'm fine" cancels an incident.
+6. **The question script is fixed.** The first "Are you okay?" is pre-recorded and plays with no model call.
+7. **`on_blood_thinner` and medications come from the patient profile**, never from a model.
+8. **The caregiver simulator page is a first-class path**, not a hack. It posts to the same inbound endpoint Photon uses.
+
+## Repo layout
+
+```text
+AGENTS.md  IMPLEMENTATION.md  TODOS.md  .env.example
+arduino/hub/hub.ino            sensors, servo latch, NFC, buzzer, serial protocol
+edge/                          runs on the Pi (QNX), plain Python, no heavy deps
+  sensor_node.py               serial reader, fusion, local incident, event posting, command polling
+  security.py                  HMAC verify, freshness, nonce cache
+  config.py                    thresholds (from calibration data) + env
+  sim_sensors.py               fake serial feed for laptop testing
+backend/                       FastAPI (Python 3.11+)
+  app/main.py                  routes: /edge/event, /edge/commands, /health, /comms/inbound, /ws
+  app/models.py                pydantic schemas for every contract below
+  app/incident.py              state machine
+  app/triage.py                StepFun + rule-based fallback
+  app/voice.py                 ElevenLabs + audio cache + stub
+  app/comms.py                 alert formatting, talks to comms-gateway
+  app/unlock.py                unlock rules (the important file)
+  app/security.py              signing
+  app/telemetry.py             sentry_sdk init + span helpers
+  tests/                       pytest: unlock suite, state machine, triage fallback
+comms-gateway/                 Node + TypeScript, Photon SDK wrapper
+dashboard/                     web UI: live incident, handoff sheet, caregiver simulator
+scripts/                       simulate_fall.py, send_test_alert.py, demo_reset.sh
+docs/                          sentry-story.md, demo-script.md, devpost-draft.md
+```
+
+Grow a file before you split it. Do not add packages, layers or abstractions that this layout doesn't need.
+
+## Wire protocol (the contract between the parts)
+
+`IMPLEMENTATION.md` section 6 has the full version. If you change a contract, update both files in the same commit and tell the team. All timestamps are **UTC epoch milliseconds**.
+
+**Arduino → Pi** (serial, 115200, `\n` terminated)
+
+| Line | Meaning |
+| --- | --- |
+| `S,<ms>,<soundPeak>,<ax>,<ay>,<az>,<distCm>` | Sensor sample, 20 per second |
+| `N,<uidHex>` | NFC tag seen |
+| `B` | Help button pressed (if wired) |
+| `ACK,<cmd>` | Reply to a command |
+
+**Pi → Arduino**: `U` (unlock, auto relock after hold), `L` (lock now), `A1` / `A0` (buzzer on/off), `D,<text>` (display text).
+
+**Pi → backend**: `POST /edge/event`
+
+| Field | Notes |
+| --- | --- |
+| `device_id` | e.g. `bath-01` |
+| `ts` | epoch ms |
+| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `nfc_tap` \| `local_unlock` \| `cancelled` |
+| `sensors` | `{sound_peak, accel_delta_g, dist_cm}` |
+| `local_incident_id` | `<device_id>-<ts>` |
+
+Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
+
+**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01` every 1 s. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display`. `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
+
+**Incident states**: `IDLE` → `CHECKING` → (`CANCELLED` on "I'm fine" | `ALERTING` on help or 8 s silence) → `RESPONDING` on any caregiver reply → `UNLOCKED` on accepted unlock → `RESOLVED` → `IDLE`.
+
+**Triage record** (StepFun output, pydantic-validated): `conscious, head_strike, pain_location, can_move, bleeding, on_blood_thinner, summary, next_question, done`. Unknown = `null`, never a guess.
+
+**Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud.
+
+**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`.
+
+## Unlock rules (non-negotiable; judges will poke at this)
+
+All must be true, every time. Code lives in `backend/app/unlock.py` and `edge/security.py`.
+
+1. An incident is open (confirmed fall within `INCIDENT_WINDOW_SECONDS`).
+2. Sender is on the `CAREGIVER_NUMBERS` allowlist.
+3. Reply contains the **one-time 4-digit code** made for this incident (compared with `hmac.compare_digest`). It dies when the incident ends.
+4. Fewer than 3 wrong tries this incident.
+5. The command is signed, fresh (< 10 s), and its nonce is unseen.
+6. The Pi independently confirms a local incident is open before moving the servo.
+7. Every attempt is logged, allowed or refused, with the reason.
+8. Auto relock after `UNLOCK_HOLD_SECONDS`.
+
+Offline, an **enrolled NFC tag** (`NFC_ALLOWED_UIDS`) unlocks only while a local incident is open.
+
+**Never add** a debug unlock, a hardcoded code, a bypass flag, or a "skip signature in dev" path. To test, use the pytest suite or the `STUB_*` switches. The full test matrix (14 cases) is `IMPLEMENTATION.md` section 9.4 and must stay green.
+
+## Fall detection rules (`edge/`)
+
+- Fusion: suspected fall when sound peak and accelerometer delta both cross their thresholds within `WINDOW_MS = 400`.
+- 30-second cooldown after each event, so one fall can't trigger twice.
+- **Thresholds come from calibration data**, not guesses: ~20 trials each of `fall_beanbag`, `sit_mat`, `bottle_drop`, `door_slam`, `footsteps`, `clap`, logged to CSV with labels. Commit the final numbers in `edge/config.py`. Recheck in the demo room.
+- On `fall_suspected` the Pi, **before any network call**: opens a local incident, starts the clock, turns the buzzer on, shows `TIME DOWN mm:ss`. Then it tries to POST. Unreachable backend → keep going locally, log to file, replay when the network returns.
+
+## Latency (measure everything in Sentry; quote only measured numbers)
+
+| Path | Rule |
+| --- | --- |
+| Thud → `TIME DOWN` on display | Local only, no network in path |
+| Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
+| StepFun triage call | Hard timeout **3 s**, then rule-based fallback |
+| Unlock reply → servo moves | ≤ ~1 s poll + verify; measure it |
+| Fall → caregiver text delivered | Measure it |
+
+One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `speech_to_text` → `stepfun_triage` → `photon_send` → `unlock_decision` → `command_to_pi`. The demo-close screenshot is this trace with the **real** end-to-end number.
+
+## StepFun usage (`backend/app/triage.py`)
+
+- OpenAI-compatible: `OpenAI(base_url=STEPFUN_BASE_URL, api_key=STEPFUN_API_KEY)`, model from `STEPFUN_MODEL` (default `step-5-preview`).
+- Every call asks for **strict JSON** (`response_format={"type": "json_object"}`, low temperature) and is validated with pydantic.
+- On timeout, bad JSON or validation failure: **fall back to rule-based keyword parsing** and a templated summary, and log it. The incident flow never waits on or crashes from the model.
+- Functions: `parse_answers(transcript, profile) → TriageRecord` · `rewrite_reply(text) → str (≤ 20 words, no added info)` · handoff summary.
+- StepFun **does not** diagnose, advise, or improvise questions. If you are tempted to let it, stop.
+- Check the StepFun docs for a low-reasoning-effort parameter before assuming one exists (`TODO(verify)`). Log latency on every call.
+- The dashboard shows the **raw transcript next to the record**, so users can see and correct what the AI understood.
+
+## Safety and ethics rules (non-negotiable)
+
+- **No cameras, no video code.** The webcam is used only as a microphone.
+- **No real personal data.** Margaret, her medications and every phone number are fictional demo data.
+- **Clone only a teammate's voice, with clear consent**, labeled as an assistant ("this is an assistant, not your daughter"). Otherwise use a stock voice.
+- **Nobody falls for real.** Beanbag drop plus a controlled sit onto a crash mat.
+- **Honest claims only.** Never write "99% accurate", "zero false alarms", "detects every fall", "clinically proven", "saves lives", "unhackable", or any latency or accuracy number you didn't measure, in code, comments, docs or UI. It is a prototype, not a medical device.
+- Sentry: `send_default_pii=False`, no audio in Sentry, mask text in Session Replay.
+- Secrets live only in `.env` (gitignored). Commit `.env.example` with every key name and no real values.
+
+## Environment: one shared `.env` at the repo root
+
+- `.env.example` (committed) lists every key. Copy to `.env` and fill it in. **No per-package `.env` files.**
+- Stub switches: `STUB_EDGE`, `STUB_STEPFUN`, `STUB_ELEVENLABS`, `STUB_PHOTON` (1 = fake, 0 = real). Default to 1 while building. **Every new integration must honor its switch** and have a tested fallback.
+- `backend/` reads config only through `os.environ` (loaded from `../.env`). `edge/` reads it through `edge/config.py`.
+- Browser code (`dashboard/`) never sees secrets. If it uses Vite, only `VITE_*` keys are exposed, so **secrets never get a `VITE_` prefix**.
+- Add a new key to `.env.example` in the same commit that first reads it.
+
+## Dev tooling
+
+| Tool | Used for | Check |
+| --- | --- | --- |
+| git, gh | branches, PRs (`gh auth login` once) | `gh auth status` |
+| Python 3.11+ | `backend/`, `edge/`, `scripts/` (venv + pip per `IMPLEMENTATION.md`) | `python3 --version` |
+| Node ≥ 20 + npm | `comms-gateway/`, `dashboard/` | `node --version` |
+| Arduino IDE or `arduino-cli` | flashing `arduino/hub/hub.ino` | `arduino-cli version` |
+| cloudflared or ngrok | public `/health` for Sentry Uptime | `cloudflared --version` |
+
+Keep `edge/` dependencies to the Python stdlib plus `pyserial` (and `requests` if QNX has it). QNX may not have pip for everything, so check before adding anything there.
+
+If a tool is missing and the install needs a human (sudo password, `gh auth login`), stop and tell the user the exact command to run. Don't silently switch to a different toolchain.
+
+## Commands
+
+```bash
+# one-time
+cp .env.example .env                          # fill in keys, never commit
+
+# backend
+cd backend && python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+pytest -q                                     # must pass before merging
+
+# comms gateway
+cd comms-gateway && npm install && npm run dev
+
+# dashboard
+cd dashboard && npm install && npm run dev
+
+# edge on the laptop, no hardware
+python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # planned interface; update if edge/ differs
+
+# fake a fall end to end (stubs)
+python3 scripts/simulate_fall.py
+
+# reset between demo runs (IDLE, servo locked, display READY)
+bash scripts/demo_reset.sh
+```
+
+## Working rules for agents
+
+- **Read `IMPLEMENTATION.md` for your task's phase and acceptance test before coding.** Prefer the smallest change that passes it.
+- **Stay inside your role's folder** (A: `arduino/`, `edge/` · B: `backend/` core · C: `comms-gateway/`, `backend/app/voice.py`, `comms.py` · D: `dashboard/`, `docs/`, `telemetry.py`). Ask before touching anything else.
+- **Test before every PR and every push to `main`.** `cd backend && pytest -q` must be green, and the unlock suite must pass for any change touching `unlock.py`, `security.py`, `incident.py` or `edge/`. Every change adds or extends tests for its logic. Paste the result summary into the PR body. Hardware-only behavior (servo, sensors, NFC, QNX) can't be unit-tested, so state exactly what you checked on the real hardware.
+- **Keep logic testable without hardware.** Fusion, nonce/freshness checks, the state machine, unlock rules and triage fallback are pure functions over timestamps and strings.
+- **Every slice of work happens on a named branch**: `<role>/<short-topic>` (e.g. `edge/fusion`, `backend/unlock`). Open a PR into `main` with `gh pr create`. Push straight to `main` only for tiny changes (typo, TODOS tick, one-line config). Rebase on `main` before merging; never overwrite someone else's work.
+- **Claim a task in `TODOS.md` before you start** (put your role on the line), and tick it only when its acceptance check passes. Add discovered work as new unchecked items. Never delete someone else's item.
+- **Keep the demo working after every merge.** The vertical slice (`simulate_fall.py` through every stub) must work by **6:00 PM Sat**, and `main` must be demo-able from then on. Replace stubs one at a time and rerun the Phase 1 acceptance test after each.
+- **Every external service has a stub and a fallback**, and every demo beat has a manual trigger (simulator page, typed answer box, "force fall" hotkey). The real pipeline stays the default path.
+- **Never invent sponsor API calls from memory.** Check the sponsor's docs (Photon `llms.txt`, StepFun, ElevenLabs, Sentry, QNX). Mark anything you couldn't verify with `TODO(verify)` and link the doc you used.
+- **Blocked or unclear contract?** (QNX audio, Photon sender number, voice calls.) Stop and say what you need. Don't guess.
+- Log every state change, every unlock attempt with its reason, and every external call's latency, keyed by incident id.
+- Python: type hints on public functions, pydantic for every contract, `ruff format` if installed. TypeScript: strict, no `any` on contract types. Arduino: no `delay()` in `loop()`; use `millis()`. Comments explain why, not what.
+- Tell the team before adding a dependency, and pin its version.
+- After the **8:30 AM freeze**: bug fixes only, each tested three times.
+- Do not add: cameras or video, a login system, cloud hosting for the backend, ML fall models that replace the two-sensor rule, LLM-generated questions, both Paper and Base44, or anything else not in `IMPLEMENTATION.md`. If you think something is missing, add it to `TODOS.md` under "Proposed" and keep going.
+- **Never weaken a rule in "Unlock rules" or "Safety and ethics rules".**
+
+## Escalation
+
+Blocked for more than 20 minutes? Post in the team channel: what you tried, what you saw, what you need. Hardware questions go to the hardware lab volunteers or the relevant sponsor table.
