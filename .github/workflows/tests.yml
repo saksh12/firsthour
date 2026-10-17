@@ -25,22 +25,15 @@ jobs:
           python-version: "3.11"  # AGENTS.md: Python 3.11+
           # No pip cache: it errors on branches without backend/requirements.txt (main today).
 
-      - name: Install
-        run: |
-          if [ ! -f backend/requirements.txt ]; then
-            echo "No backend/requirements.txt on this branch yet; nothing to install."
-            exit 0
-          fi
-          pip install -r backend/requirements.txt
-
-      - name: pytest
-        working-directory: backend
+      - name: Install and run pytest
         env:
           # Tests build their own settings; this only keeps app.main importable.
           SHARED_SECRET: ci-test-secret
         run: |
-          if [ ! -d tests ]; then
-            echo "No backend/tests on this branch yet; skipping."
+          if [ ! -f backend/requirements.txt ] || ! ls backend/tests/test_*.py >/dev/null 2>&1; then
+            echo "No backend tests on this branch yet (main today); nothing to run."
             exit 0
           fi
+          pip install -r backend/requirements.txt
+          cd backend
           python -m pytest -q -p no:warnings
