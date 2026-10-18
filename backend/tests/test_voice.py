@@ -82,8 +82,8 @@ def test_prewarm_covers_all_five_questions_plus_assistant(voice_factory):
 def test_lines_play_in_order_through_one_worker(voice_factory):
     order = []
     tts = FakeTTS()
-    v = voice_factory(**real(), transport=tts, afplay=None,
-                      player=lambda argv: order.append(argv[1]))
+    v = voice_factory(**real(), transport=tts, afplay="",
+                      player=lambda argv: order.append(argv[-1]))
     lines = [f"line {i}" for i in range(5)]
     for line in lines:
         v.speak(line)
@@ -91,10 +91,67 @@ def test_lines_play_in_order_through_one_worker(voice_factory):
     assert order == lines  # `say` fallback arg is the text itself
 
 
+def test_say_argv_ends_options_with_dash_dash(voice_factory):
+    """A caregiver reply starting with '-' must stay one arg after '--',
+    or `say -o/tmp/x.aiff` would write a file instead of speaking."""
+    played = []
+    v = voice_factory(stub=True, afplay="", say="/usr/bin/say",
+                      player=lambda argv: played.append(argv))
+    v.speak("-o/tmp/x.aiff")
+    assert wait_for(lambda: played)
+    argv = played[0]
+    assert argv == ["/usr/bin/say", "--", "-o/tmp/x.aiff"]
+    assert argv.index("--") < argv.index("-o/tmp/x.aiff")
+
+
+def test_dash_reply_is_single_arg_after_dash_dash(voice_factory):
+    played = []
+    v = voice_factory(stub=True, afplay="", say="/usr/bin/say",
+                      player=lambda argv: played.append(argv))
+    v.speak("-v Alex open it")
+    assert wait_for(lambda: played)
+    argv = played[0]
+    assert argv[-1] == "-v Alex open it" and argv[-2] == "--"
+
+
+def test_app_settings_dict_without_key_falls_back_to_env(tmp_path, monkeypatch):
+    """create_app(settings()) has no VOICE_PLAYBACK key: it must honor the
+    env var (conftest sets 0) instead of defaulting to on — the regression
+    that made the whole suite call `say` 56 times on a Mac."""
+    import os
+    from app.main import create_app
+    from fastapi.testclient import TestClient
+
+    calls = tmp_path / "say_calls"
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    say = fake / "say"
+    say.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n')
+    say.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setenv("VOICE_PLAYBACK", "0")
+
+    client = TestClient(create_app({"STUB_EDGE": True, "SHARED_SECRET": "test-secret",
+                                    "CAREGIVER_NUMBERS": "+13105550101",
+                                    "INCIDENT_WINDOW_SECONDS": 600}))
+    import json, time
+    from edge.security import sign_event
+    ts = int(time.time() * 1000)
+    body = json.dumps({"device_id": "bath-01", "ts": ts, "type": "fall_suspected",
+                       "sensors": {"sound_peak": 812, "accel_delta_g": 1.9, "dist_cm": 28},
+                       "local_incident_id": f"bath-01-{ts}"}).encode()
+    with client:
+        r = client.post("/edge/event", content=body,
+                        headers={"X-Signature": sign_event("test-secret", ts, body)})
+        assert r.status_code == 200
+        time.sleep(0.3)  # give the worker a beat to (not) play
+    assert not calls.exists(), "say was invoked despite VOICE_PLAYBACK=0"
+
+
 def test_failing_api_falls_back_to_say(voice_factory):
     tts = FakeTTS(error=OSError("connection refused"))
     played = []
-    v = voice_factory(**real(), transport=tts, afplay=None,
+    v = voice_factory(**real(), transport=tts, afplay="",
                       player=lambda argv: played.append(argv))
     v.speak("Did you hit your head?")
     assert wait_for(lambda: played)
@@ -104,7 +161,7 @@ def test_failing_api_falls_back_to_say(voice_factory):
 def test_slow_api_falls_back_within_timeout(voice_factory):
     tts = FakeTTS(delay=30)  # hangs far past the timeout
     played = []
-    v = voice_factory(**real(timeout=0.2), transport=tts, afplay=None,
+    v = voice_factory(**real(timeout=0.2), transport=tts, afplay="",
                       player=lambda argv: played.append(argv))
     t0 = time.time()
     v.speak("Can you move your legs?")
@@ -118,7 +175,7 @@ def test_stub_mode_never_calls_network(voice_factory):
         raise AssertionError("network called in stub mode")
 
     played = []
-    v = voice_factory(stub=True, transport=bad_transport, afplay=None,
+    v = voice_factory(stub=True, transport=bad_transport, afplay="",
                       player=lambda argv: played.append(argv))
     v.prewarm([t for _, t in QUESTIONS])  # no-op in stub
     v.speak("hello")
@@ -127,7 +184,7 @@ def test_stub_mode_never_calls_network(voice_factory):
 
 
 def test_stub_without_say_only_logs(voice_factory, caplog):
-    v = voice_factory(stub=True, afplay=None, say=None)
+    v = voice_factory(stub=True, afplay="", say="")
     with caplog.at_level(logging.INFO, "firsthour.voice"):
         v.speak("hi")
         assert wait_for(lambda: any("voice line" in r.getMessage() for r in caplog.records))
@@ -161,7 +218,7 @@ def test_speak_returns_immediately_when_player_hangs(voice_factory):
 
 def test_caregiver_text_never_logged(voice_factory, caplog):
     secret_text = "the door code is actually 9876"
-    v = voice_factory(**real(), transport=FakeTTS(), afplay=None,
+    v = voice_factory(**real(), transport=FakeTTS(), afplay="",
                       player=lambda argv: None)
     with caplog.at_level(logging.DEBUG):
         v.speak(secret_text)
@@ -173,7 +230,7 @@ def test_caregiver_text_never_logged(voice_factory, caplog):
 def test_real_requires_key_and_voice_id(voice_factory):
     played = []
     v = voice_factory(stub=False, api_key="", voice_id="",
-                      transport=FakeTTS(), afplay=None,
+                      transport=FakeTTS(), afplay="",
                       player=lambda argv: played.append(argv))
     assert not v.real  # missing creds degrades to stub path, no network
     v.speak("hi")

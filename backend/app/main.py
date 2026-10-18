@@ -182,7 +182,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
     voice = Voice(
-        playback=s.get("VOICE_PLAYBACK", True), stub=s.get("STUB_ELEVENLABS", True),
+        # A settings dict that omits the key falls back to the env var (conftest
+        # sets VOICE_PLAYBACK=0 so test apps stay silent); default is on.
+        playback=s.get("VOICE_PLAYBACK", os.getenv("VOICE_PLAYBACK", "1") == "1"),
+        stub=s.get("STUB_ELEVENLABS", True),
         api_key=s.get("ELEVENLABS_API_KEY", ""), voice_id=s.get("ELEVENLABS_VOICE_ID", ""),
         model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
         base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,

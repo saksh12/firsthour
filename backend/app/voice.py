@@ -65,6 +65,8 @@ class Voice:
         self.real = not stub and bool(api_key and voice_id)
         self._transport = transport or self._http_post
         self._player = player            # injected in tests; runs argv
+        # None = auto-detect the real binary; "" or any path injects it, so
+        # tests are hermetic and never depend on the host having afplay/say.
         self._afplay = afplay if afplay is not None else shutil.which("afplay")
         self._say = say if say is not None else shutil.which("say")
         self._span = span or (lambda **kw: _nullctx())
@@ -178,7 +180,9 @@ class Voice:
             if audio is not None and self._afplay:
                 return self._run([self._afplay, str(audio)])
             if self._say:
-                return self._run([self._say, text])
+                # "--" ends options: a caregiver reply like "-o/tmp/x.aiff" is
+                # spoken as text, not parsed as a say flag that writes a file.
+                return self._run([self._say, "--", text])
         except Exception as e:
             log.warning("player failed ref=%s error=%s", line_ref(text), e)
         return False
