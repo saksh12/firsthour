@@ -8,7 +8,7 @@ A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Ard
 
 ## Status
 
-Last updated Sat Oct 17, 5:25 PM.
+Last updated Sat Oct 17, 7:38 PM.
 
 | Status | Meaning |
 | --- | --- |
@@ -53,6 +53,22 @@ Last updated Sat Oct 17, 5:25 PM.
 
 - **No NFC reader and no servo** at the event. NFC is dropped. The latch is simulated: the Pi verifies the signed command and tells the Arduino to open; the Mac shows the door only after the Pi confirms.
 
+### Changed in #25: what you need to do
+
+#25 fixed the review bugs in #21. Four of the changes affect how you work:
+
+- **Pi: pull before the next hardware test.** Command polls are now signed (`GET /edge/commands?device_id=…&ts=…` with `X-Signature`). An old `sensor_node.py` gets 401 on every poll and never receives a command. The Pi's clock must be within 10 s of the laptop's: compare `date -u` on both. If the edge log says `command poll rejected status=401`, the clock is off or `SHARED_SECRET` differs.
+- **Arduino: answer `ACK,U` to `U`.** The sketch in IMPLEMENTATION.md 8.2 already does. The Pi reports the door open only after that ACK. With no ACK within 2 s (`UNLOCK_ACK_TIMEOUT_SECONDS`) it reports `unlock_failed`, and the dashboard door says "Unlock failed". On the laptop, `sensor_node.py --stdin` fakes the ACK; add `--no-ack` to see the failure.
+- **Dashboard: buttons work only on the laptop.** Resolve, the typed answer box and the caregiver simulator (stub mode) are refused (403) from any other device; a phone can still watch. Through the Sentry tunnel only `/health` answers. Open the pages on the laptop at `http://localhost:5173`.
+- **Between demo runs: `bash scripts/demo_reset.sh`.** It puts the backend back in IDLE and sends the Pi a signed reset (latch locked, alarm off, fall cooldown cleared, `READY`). The Pi obeys it only with no local incident open, so the backend first sends `alarm_off` for the open incident.
+
+Other changes:
+- The unlock code works once.
+- The local alarm no longer gives up after 10 minutes; only unlocks expire.
+- The Pi's network calls no longer stall the sensors.
+- A caregiver reply survives a gateway forward failing once.
+- StepFun runs one triage call at a time.
+
 ### Keys in `.env` (checked with real calls)
 
 | Key | Status |
@@ -75,6 +91,7 @@ python3 -m venv backend/.venv && backend/.venv/bin/pip install -r backend/requir
 backend/.venv/bin/uvicorn --app-dir backend app.main:app --host 0.0.0.0 --port 8000   # 0.0.0.0 so the Pi can reach it
 python3 -m http.server 5173 -d dashboard                # dashboard at http://localhost:5173
 python3 scripts/simulate_fall.py                        # whole story on stubs
-python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # edge node, type f + Enter for a fall
+python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # edge node, type f + Enter for a fall (--no-ack: dead latch)
+bash scripts/demo_reset.sh                              # between demo runs
 (cd backend && .venv/bin/python -m pytest -q)           # tests
 ```

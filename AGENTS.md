@@ -263,6 +263,7 @@ python3 -m http.server 5173 -d dashboard
 
 # edge on the laptop, no hardware
 python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, b for the help button
+                                              # stdin fakes the latch's ACK,U; --no-ack simulates a dead latch
 
 # fake a fall end to end (stubs)
 python3 scripts/simulate_fall.py
