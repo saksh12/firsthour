@@ -82,22 +82,40 @@ def main() -> None:
     if not secret or not caregiver:
         sys.exit("SHARED_SECRET and CAREGIVER_NUMBERS must be set (env or .env)")
     api = Api(args.url)
+    try:
+        run(api, args, secret, caregiver)
+    finally:
+        # A failed run must not leave an incident open to swallow the next real fall.
+        _, snap = api.call("GET", "/incident")
+        if snap and snap.get("state") != "IDLE":
+            api.call("POST", "/incident/resolve")
+            print("   (cleanup: resolved the open incident)")
+
+
+def run(api: Api, args, secret: str, caregiver: str) -> None:
     pi = CommandVerifier(secret)
 
     step("Backend health")
+    # Play the Pi's heartbeat so /health is green with STUB_EDGE=0 too.
+    ts = int(time.time() * 1000)
+    hb = json.dumps({"device_id": args.device, "ts": ts, "type": "heartbeat"}).encode()
+    api.call("POST", "/edge/event", raw=hb, headers={"X-Signature": sign_event(secret, ts, hb)})
     status, body = api.call("GET", "/health")
     check(status == 200, f"/health -> {status} {body}")
     status, body = api.call("GET", "/incident")
     if body and body.get("state") != "IDLE":
         print("   incident already open; resolving it first")
         api.call("POST", "/incident/resolve")
+    # Drop commands left from earlier runs (e.g. their alarm_off), as the Pi would after a restart.
+    api.call("GET", f"/edge/commands?device_id={args.device}")
 
     step("Pi posts a signed fall_suspected event")
     ts = int(time.time() * 1000)
+    incident_id = f"{args.device}-{ts}"
     raw = json.dumps({
         "device_id": args.device, "ts": ts, "type": "fall_suspected",
         "sensors": {"sound_peak": 812, "accel_delta_g": 1.9, "dist_cm": 28},
-        "local_incident_id": f"{args.device}-{ts}",
+        "local_incident_id": incident_id,
     }).encode()
     status, body = api.call("POST", "/edge/event", raw=raw, headers={"X-Signature": sign_event(secret, ts, raw)})
     check(status == 200 and body["state"] == "CHECKING", f"event accepted, state {body.get('state')}")
@@ -111,7 +129,7 @@ def main() -> None:
         _, snap = api.call("POST", "/person/answer", {"text": "I'm fine"})
         check(snap["state"] == "IDLE", "incident cancelled, back to IDLE")
         _, inbox = api.call("GET", "/comms/stub/outbox")
-        check(not any(m["incident_id"] == f"{args.device}-{ts}" for m in inbox["messages"]), "no alert sent")
+        check(not any(m["incident_id"] == incident_id for m in inbox["messages"]), "no alert sent")
         print("\nDONE (cancel path)")
         return
 
@@ -158,9 +176,9 @@ def main() -> None:
     _, cmds = api.call("GET", f"/edge/commands?device_id={args.device}")
     check(len(cmds["commands"]) == 1 and cmds["commands"][0]["action"] == "unlock", "one unlock command")
     cmd = cmds["commands"][0]
-    ok, reason = pi.check(cmd, local_incident_open=True)
+    ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(ok, f"Pi accepts: {reason}  (real Pi would now send U to the Arduino)")
-    ok, reason = pi.check(cmd, local_incident_open=True)
+    ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(not ok and reason == "replay", "replaying the same command is refused")
 
     step("Operator resolves")

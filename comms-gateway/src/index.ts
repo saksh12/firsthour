@@ -8,7 +8,7 @@ const cfg = loadConfig();
 const gateway = new PhotonGateway(cfg);
 const server = createServer(cfg, gateway);
 
-server.listen(cfg.port, () => {
+server.listen(cfg.port, "127.0.0.1", () => {
   const mode = cfg.stubPhoton ? "STUB (no Photon, outbox only)" : "LIVE (Photon)";
   console.log(`comms-gateway listening on :${cfg.port} — ${mode}`);
   console.log(`forwarding inbound to ${cfg.backendUrl}/comms/inbound`);
@@ -19,6 +19,7 @@ server.listen(cfg.port, () => {
         "STUB_PHOTON=0 but PHOTON_TOKEN / PHOTON_PROJECT_ID / PHOTON_AGENT_HANDLE " +
           "are not all set. Fill them in .env or keep STUB_PHOTON=1.",
       );
+      process.exitCode = 1;
     } else {
       startInboundPoller(cfg, gateway);
       console.log("inbound poller started (polling Photon every 2s)");

@@ -11,10 +11,10 @@ FirstHour is a **camera-free fall-response node** for a bathroom. A Raspberry Pi
 | M1 | **The thud** | Display flips to `TIME DOWN 00:01`. Terminal shows both sensors spiking | Sound peak + accelerometer spike agree within 400 ms |
 | M2 | **The voice** | Calm synthetic voice: "Are you okay? Say 'I'm fine' or 'I need help.'" Short scripted triage follows | `fall_suspected` event reaches the backend |
 | M3 | **The text** | Caregiver phone buzzes with a triage card. Their reply is read aloud to the person on the floor | Any answer other than a clear "I'm fine", or 8 s of silence |
-| M4 | **The door** | Caregiver replies `UNLOCK <code>`, servo clicks the latch open. A stranger's text is refused | Every unlock rule passes (see below) |
-| M5 | **The offline test** | Wi-Fi unplugged: box still alarms, clock still counts, enrolled NFC tag unlocks | Local incident open on the Pi |
+| M4 | **The door** | Caregiver replies `UNLOCK <code>`, the simulated latch opens on the Mac (see "No servo" below). A stranger's text is refused | Every unlock rule passes (see below) |
+| M5 | **The offline test** | Wi-Fi unplugged: box still alarms, clock still counts; the door stays locked (safe default) and the Pi replays its log on reconnect | Local incident open on the Pi |
 
-The pitch rests on **local safety, cloud convenience**: detection, alarm, signature checks and NFC unlock live on the Pi. The cloud can ask; **the Pi decides**. Never move safety logic off the Pi.
+The pitch rests on **local safety, cloud convenience**: detection, alarm, signature checks and the final unlock decision live on the Pi. The cloud can ask; **the Pi decides**. Never move safety logic off the Pi.
 
 Hackathon: LA Hacks 2026, UCLA. Hacking runs **Sat Oct 17 to Sun Oct 18, 12:00 PM**. Code freeze **Sun 8:30 AM** (tag `demo-ready`). Submit on Devpost by **11:00 AM**.
 
@@ -24,7 +24,7 @@ Every sponsor below has a real job in the pipeline. If a change would break one 
 
 | Sponsor | Requirement to qualify | Our usage |
 | --- | --- | --- |
-| **Main track**: Beyond the Digital | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, servo latch, NFC |
+| **Main track**: Beyond the Digital | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, simulated door latch |
 | **QNX** | Product runs on **QNX OS** and includes **one open-source AI module from `oss.qnx.com`** | `edge/` on the Pi. Module: `TODO(verify)` at the QNX table. **Gate 1 at 7:00 PM Sat**: if QNX isn't booting and reading serial, run `edge/` on Linux and drop this prize |
 | **StepFun**: Get It Done with Step 5 Preview | App **must call `step-5-preview` at runtime**. Explain what every other model does. Judged on task completion, reliability, user understanding and control | Turns spoken answers into the triage record, writes the handoff summary, rewrites caregiver replies into one calm sentence |
 | **Photon**: Messaging/Calling Agent | Build on **Photon 2.0 beta** | `comms-gateway/`: alert text out, caregiver reply in. Voice calls only if confirmed available (`TODO(verify)`) |
@@ -43,11 +43,22 @@ Nothing here is verified yet. Whoever confirms a fact replaces the `TODO(verify)
 - **The Pi polls the backend; it never accepts inbound connections.** No port or firewall problems on venue Wi-Fi.
 - **Venue Wi-Fi may isolate clients.** Have a phone hotspot set up and tested before you need it.
 - QNX board image, flashing steps, Python runtime on QNX, and serial device path: `TODO(verify)` at the QNX table.
-- Accelerometer chip, NFC board type (I2C vs UART), Grove shield, display type: `TODO(verify)`, read the module labels.
-- Photon: does an inbound reply carry the **sender's number**? Are **outbound calls** supported? `TODO(verify)`. Without the sender number, the unlock demo runs on the caregiver simulator.
+- Accelerometer chip, Grove shield, display type: `TODO(verify)`, read the module labels.
+- **No NFC reader and no servo at the event** (decided Sat). NFC is removed from the code and the contracts. The latch is simulated, see below.
+- Photon: inbound replies **do** carry the sender's number (`sentBy.handle`). A **shared** line can't send the first message, so the caregiver texts the agent line once before the demo. Dedicated line and outbound calls: `TODO(verify)` at the Photon table.
 - StepFun base URL depends on the key: `https://api.stepfun.com/v1` or `https://api.stepfun.ai/v1`. **Never hardcode either.**
 - ElevenLabs voice cloning and realtime STT on our tier: `TODO(verify)`. Fallback is a stock voice and browser Web Speech API.
-- Servo on USB power can brown out the Arduino. If it jitters or resets, use a separate 5V supply with a shared ground.
+
+### No servo: the simulated latch
+
+There is no servo motor, so the door latch is simulated, and the security chain stays exactly as real as with a servo:
+
+1. The backend grants an unlock and queues a **signed** `unlock` command (all unlock rules below).
+2. The Pi verifies it (signature, freshness, nonce, **its own** open incident) and sends `U` to the Arduino.
+3. The Arduino "opens the latch": it lights the latch LED (if wired), answers `ACK,U` and relocks itself after `UNLOCK_HOLD_SECONDS`.
+4. The Pi reports `local_unlock` to the backend, and **the Mac shows the door opening** (dashboard door panel).
+
+The Mac only ever shows what the Pi reports, never the backend's grant: until the Pi confirms, the dashboard says "Unlocking…". Never fake the opening on the Mac from the grant alone.
 
 Docs: `docs.photon.codes/docs/llms.txt` (Photon index) · `oss.qnx.com` (QNX modules) · StepFun, ElevenLabs and Sentry developer docs for exact parameter names.
 
@@ -60,8 +71,8 @@ Docs: `docs.photon.codes/docs/llms.txt` (Photon index) · `oss.qnx.com` (QNX mod
 │ • sound (A0)          │  lines     │ • fusion (sound + accel)     │ events  │ • incident state machine      │──▶ ElevenLabs TTS / STT
 │ • accelerometer (I2C) │            │ • local incident + clock     │◀────────│ • triage (StepFun + rules)    │──▶ Sentry
 │ • ultrasonic (D7)     │            │ • buzzer + TIME DOWN display │ polled  │ • voice (cached audio)        │
-│ • NFC                 │            │ • verifies SIGNED commands   │ signed  │ • unlock rules + signing      │
-│ • servo latch (D9)    │            │ • offline NFC unlock         │ cmds    │ • /health (503 if Pi silent)  │
+│ • latch LED (sim)     │            │ • verifies SIGNED commands   │ signed  │ • unlock rules + signing      │
+│                       │            │ • reports local_unlock       │ cmds    │ • /health (503 if Pi silent)  │
 │ • buzzer / LED / LCD  │            │ • local log, replay on recon │         └───────┬──────────────┬────────┘
 └───────────────────────┘            └──────────────────────────────┘                 │              │ ws
                                                                        ┌─────────────▼──────┐ ┌─────▼──────────────────┐
@@ -88,7 +99,7 @@ Key decisions (already made; don't relitigate):
 
 ```text
 AGENTS.md  IMPLEMENTATION.md  TODOS.md  .env.example
-arduino/hub/hub.ino            sensors, servo latch, NFC, buzzer, serial protocol
+arduino/hub/hub.ino            sensors, simulated latch (LED + relock timer), buzzer, serial protocol
 edge/                          runs on the Pi (QNX), plain Python, no heavy deps
   sensor_node.py               serial reader, fusion, local incident, event posting, command polling
   security.py                  HMAC verify, freshness, nonce cache
@@ -122,7 +133,6 @@ Grow a file before you split it. Do not add packages, layers or abstractions tha
 | Line | Meaning |
 | --- | --- |
 | `S,<ms>,<soundPeak>,<ax>,<ay>,<az>,<distCm>` | Sensor sample, 20 per second |
-| `N,<uidHex>` | NFC tag seen |
 | `B` | Help button pressed (if wired) |
 | `ACK,<cmd>` | Reply to a command |
 
@@ -134,7 +144,7 @@ Grow a file before you split it. Do not add packages, layers or abstractions tha
 | --- | --- |
 | `device_id` | e.g. `bath-01` |
 | `ts` | epoch ms |
-| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `nfc_tap` \| `local_unlock` \| `cancelled` |
+| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Pi opened the latch) \| `cancelled` |
 | `sensors` | `{sound_peak, accel_delta_g, dist_cm}` |
 | `local_incident_id` | `<device_id>-<ts>` |
 
@@ -159,13 +169,13 @@ All must be true, every time. Code lives in `backend/app/unlock.py` and `edge/se
 3. Reply contains the **one-time 4-digit code** made for this incident (compared with `hmac.compare_digest`). It dies when the incident ends.
 4. Fewer than 3 wrong tries this incident.
 5. The command is signed, fresh (< 10 s), and its nonce is unseen.
-6. The Pi independently confirms a local incident is open before moving the servo.
+6. The Pi independently confirms the command names **its own open incident** before opening the latch.
 7. Every attempt is logged, allowed or refused, with the reason.
 8. Auto relock after `UNLOCK_HOLD_SECONDS`.
 
-Offline, an **enrolled NFC tag** (`NFC_ALLOWED_UIDS`) unlocks only while a local incident is open.
+Offline, nothing unlocks the door: it stays locked until the backend is reachable again.
 
-**Never add** a debug unlock, a hardcoded code, a bypass flag, or a "skip signature in dev" path. To test, use the pytest suite or the `STUB_*` switches. The full test matrix (14 cases) is `IMPLEMENTATION.md` section 9.4 and must stay green.
+**Never add** a debug unlock, a hardcoded code, a bypass flag, or a "skip signature in dev" path. To test, use the pytest suite or the `STUB_*` switches. The full test matrix (11 cases) is `IMPLEMENTATION.md` section 9.4 and must stay green.
 
 ## Fall detection rules (`edge/`)
 
@@ -181,14 +191,14 @@ Offline, an **enrolled NFC tag** (`NFC_ALLOWED_UIDS`) unlocks only while a local
 | Thud → `TIME DOWN` on display | Local only, no network in path |
 | Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
 | StepFun triage call | Hard timeout **3 s**, then rule-based fallback |
-| Unlock reply → servo moves | ≤ ~1 s poll + verify; measure it |
+| Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
 
 One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `speech_to_text` → `stepfun_triage` → `photon_send` → `unlock_decision` → `command_to_pi`. The demo-close screenshot is this trace with the **real** end-to-end number.
 
 ## StepFun usage (`backend/app/triage.py`)
 
-- OpenAI-compatible: `OpenAI(base_url=STEPFUN_BASE_URL, api_key=STEPFUN_API_KEY)`, model from `STEPFUN_MODEL` (default `step-5-preview`).
+- OpenAI-compatible `POST {STEPFUN_BASE_URL}/chat/completions` over stdlib `urllib` (no SDK dependency), model from `STEPFUN_MODEL` (default `step-5-preview`).
 - Every call asks for **strict JSON** (`response_format={"type": "json_object"}`, low temperature) and is validated with pydantic.
 - On timeout, bad JSON or validation failure: **fall back to rule-based keyword parsing** and a templated summary, and log it. The incident flow never waits on or crashes from the model.
 - Functions: `parse_answers(transcript, profile) → TriageRecord` · `rewrite_reply(text) → str (≤ 20 words, no added info)` · handoff summary.
@@ -220,7 +230,7 @@ One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `spee
 | --- | --- | --- |
 | git, gh | branches, PRs (`gh auth login` once) | `gh auth status` |
 | Python 3.11+ | `backend/`, `edge/`, `scripts/` (venv + pip per `IMPLEMENTATION.md`) | `python3 --version` |
-| Node ≥ 20 + npm | `comms-gateway/`, `dashboard/` | `node --version` |
+| Node ≥ 22 + npm | `comms-gateway/` (Photon's SDK needs 22) | `node --version` |
 | Arduino IDE or `arduino-cli` | flashing `arduino/hub/hub.ino` | `arduino-cli version` |
 | cloudflared or ngrok | public `/health` for Sentry Uptime | `cloudflared --version` |
 
@@ -243,16 +253,16 @@ pytest -q                                     # must pass before merging
 # comms gateway
 cd comms-gateway && npm install && npm run dev
 
-# dashboard
-cd dashboard && npm install && npm run dev
+# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html)
+python3 -m http.server 5173 -d dashboard
 
 # edge on the laptop, no hardware
-python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, n for NFC
+python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, b for the help button
 
 # fake a fall end to end (stubs)
 python3 scripts/simulate_fall.py
 
-# reset between demo runs (IDLE, servo locked, display READY)
+# reset between demo runs (IDLE, latch locked, display READY)
 bash scripts/demo_reset.sh
 ```
 
@@ -260,7 +270,7 @@ bash scripts/demo_reset.sh
 
 - **Read `IMPLEMENTATION.md` for your task's phase and acceptance test before coding.** Prefer the smallest change that passes it.
 - **Stay inside your role's folder** (A: `arduino/`, `edge/` · B: `backend/` core · C: `comms-gateway/`, `backend/app/voice.py`, `comms.py` · D: `dashboard/`, `docs/`, `telemetry.py`). Ask before touching anything else.
-- **Test before every PR and every push to `main`.** `cd backend && pytest -q` must be green, and the unlock suite must pass for any change touching `unlock.py`, `security.py`, `incident.py` or `edge/`. Every change adds or extends tests for its logic. Paste the result summary into the PR body. Hardware-only behavior (servo, sensors, NFC, QNX) can't be unit-tested, so state exactly what you checked on the real hardware.
+- **Test before every PR and every push to `main`.** `cd backend && pytest -q` must be green, and the unlock suite must pass for any change touching `unlock.py`, `security.py`, `incident.py` or `edge/`. Every change adds or extends tests for its logic. Paste the result summary into the PR body. Hardware-only behavior (latch LED, sensors, QNX) can't be unit-tested, so state exactly what you checked on the real hardware.
 - **Keep logic testable without hardware.** Fusion, nonce/freshness checks, the state machine, unlock rules and triage fallback are pure functions over timestamps and strings.
 - **Every slice of work happens on a named branch**: `<role>/<short-topic>` (e.g. `edge/fusion`, `backend/unlock`). Open a PR into `main` with `gh pr create`. Push straight to `main` only for tiny changes (typo, TODOS tick, one-line config). Rebase on `main` before merging; never overwrite someone else's work.
 - **Claim a task in `TODOS.md` before you start** (put your role on the line), and tick it only when its acceptance check passes. Add discovered work as new unchecked items. Never delete someone else's item.

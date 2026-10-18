@@ -25,6 +25,42 @@ def test_yes_no(text, expected):
     assert yes_no(text) is expected
 
 
+# Issue #13 bug 1: a "no" the person never said must not reach the caregiver.
+@pytest.mark.parametrize("text,topic,expected", [
+    ("I can't remember", "head", None),
+    ("I cannot tell", "bleeding", None),
+    ("I don't remember", "head", None),
+    ("Yes, not too hard", "head", True),
+    ("Help, I slipped and can't move my leg", "head", None),
+    ("yes and no", "head", None),
+    ("I'm not bleeding", "bleeding", False),
+    ("my head is fine, I didn't hit it", "head", False),
+    ("I can't move my leg", "move", False),
+    ("not really", "move", False),
+    ("I'm okay", "head", None),
+    ("I am", "bleeding", True),
+])
+def test_yes_no_never_invents_an_answer(text, topic, expected):
+    assert yes_no(text, topic) is expected
+
+
+def test_late_q1_answer_filed_under_head_is_unknown():
+    rec = parse_rules([("ok", ""), ("head", "Help, I slipped and can't move my leg")], DEMO_PROFILE)
+    assert rec.head_strike is None
+    assert rec.can_move is False
+    assert "head" not in rec.summary.lower()
+
+
+def test_negated_head_strike_in_free_text():
+    rec = parse_rules([("ok", "I'm hurt but I didn't hit my head")], DEMO_PROFILE)
+    assert rec.head_strike is False
+
+
+def test_blood_thinner_is_not_bleeding():
+    rec = parse_rules([("ok", "help, I'm on a blood thinner")], DEMO_PROFILE)
+    assert rec.bleeding is None
+
+
 @pytest.mark.parametrize("text,expected", [
     ("my right hip", "right hip"), ("Left knee hurts", "left knee"), ("my back", "back"),
     ("everywhere", None), ("both legs", "leg"),

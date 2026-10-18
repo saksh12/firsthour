@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSendBody,
+  conversationOf,
   extractPlainText,
   isCaregiverReply,
   toBackendInbound,
@@ -71,18 +72,17 @@ describe("isCaregiverReply", () => {
 });
 
 describe("toBackendInbound", () => {
-  it("maps the fields the backend needs, incl. the sender's number", () => {
-    expect(toBackendInbound(received())).toEqual({
-      from: CAREGIVER,
-      body: "UNLOCK 4821",
-      platform: "imessage",
-      spaceId: "space_1",
-      senderId: "u_agent",
-      messageId: "msg_1",
-    });
+  it("maps to the backend's {sender, text}, incl. the sender's number", () => {
+    expect(toBackendInbound(received())).toEqual({ sender: CAREGIVER, text: "UNLOCK 4821" });
   });
   it("throws when there is no plain text", () => {
     expect(() => toBackendInbound(received({ content: { type: "image" } }))).toThrow();
+  });
+});
+
+describe("conversationOf", () => {
+  it("replies in the same space as our agent user", () => {
+    expect(conversationOf(received())).toEqual({ spaceId: "space_1", senderId: "u_agent" });
   });
 });
 
@@ -93,9 +93,5 @@ describe("buildSendBody", () => {
       senderId: "a",
       content: { type: "text", format: "plain", text: "hi" },
     });
-  });
-  it("includes parentMessageId when replying", () => {
-    const body = buildSendBody({ spaceId: "s", senderId: "a", parentMessageId: "m", text: "hi" });
-    expect(body.parentMessageId).toBe("m");
   });
 });

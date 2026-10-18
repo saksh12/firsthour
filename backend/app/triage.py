@@ -42,15 +42,32 @@ BODY_PARTS = [
     "back", "hip", "leg", "knee", "ankle", "foot", "side", "stomach",
 ]
 
-_UNSURE = re.compile(r"\b(don't know|dont know|not sure|no idea|i think so|maybe)\b")
-_NO = re.compile(r"\b(no|nope|nah|not|didn't|didnt|don't|dont|can't|cant|cannot|isn't|haven't|wasn't)\b")
-_YES = re.compile(r"\b(yes|yeah|yep|yup|i did|i am|i can|a little|a bit)\b")
+_UNSURE = re.compile(
+    r"\b(don't know|dont know|not sure|no idea|i think so|maybe"
+    r"|(can't|cant|cannot|can not|don't|dont|do not) (remember|tell|say|recall))\b"
+)
+_YES_WORD = re.compile(r"\b(yes|yeah|yep|yup)\b")
+_NO_WORD = re.compile(r"\b(no|nope|nah)\b")
+# A short direct answer: "I did", "I can't", "I'm not". Only counts at the start.
+# "I'm okay" to "Did you hit your head?" is not a yes, so "I am" counts only on its own.
+_LEAD_YES = re.compile(r"^(i did|i do|i can|a little|a bit)\b|^(i am|i'm)\W*$")  # checked after _LEAD_NO
+_LEAD_NO = re.compile(r"^(i didn't|i didnt|i did not|i don't|i dont|i do not|i can't|i cant|i cannot"
+                      r"|i can not|i'm not|im not|i am not|not really|never)\b")
+_NEG = re.compile(r"\b(no|not|never|didn't|didnt|don't|dont|can't|cant|cannot|isn't|wasn't|haven't)\b")
+# A negation only answers a question if the answer is about that question's subject:
+# "can't move my leg" says nothing about the head.
+_TOPIC = {
+    "head": re.compile(r"\b(head|hit|bump|bumped|bang|banged)\b"),
+    "move": re.compile(r"\b(move|moving|get up|stand|legs?)\b"),
+    "bleeding": re.compile(r"\b(bleed|bleeding|blood)\b"),
+}
 _FINE = re.compile(r"\b(i'm|im|i am)\s+(fine|okay|ok|alright|all right)\b|^(fine|okay|ok)$")
 # Anything that means "not fine" even when "I'm fine" also appears.
 _TROUBLE = re.compile(r"\b(help|hurt|hurts|pain|can't|cant|cannot|not|but|fell|bleed|bleeding|blood|stuck|dizzy)\b")
 _CANT_MOVE = re.compile(r"\b(can't|cant|cannot|unable to|not able to)\s+(move|get up|stand)\b")
 _HIT_HEAD = re.compile(r"\b(hit|banged|bumped|smacked)\s+my\s+head\b")
-_BLEEDING = re.compile(r"\b(bleeding|blood)\b")
+_NOT_HIT_HEAD = re.compile(r"\b(not|didn't|didnt|did not|never|no)\b[^.]*\b(hit|banged|bumped|smacked)\s+my\s+head\b")
+_BLEEDING = re.compile(r"\b(bleeding|blood)\b(?!\s+thinner)")
 _NOT_BLEEDING = re.compile(r"\b(not|no|isn't|wasn't)\b[^.]*\b(bleeding|blood)\b")
 _PART = re.compile(r"\b(?:(left|right)\s+)?(" + "|".join(BODY_PARTS) + r")s?\b")
 
@@ -65,14 +82,25 @@ def is_clear_fine(text: str) -> bool:
     return bool(_FINE.search(t)) and not _TROUBLE.search(t)
 
 
-def yes_no(text: str) -> Optional[bool]:
+def yes_no(text: str, topic: Optional[str] = None) -> Optional[bool]:
+    """The answer to a yes/no question, or None when it isn't a clear one.
+
+    The leading word decides ("Yes, not too hard" is a yes). A yes and a no in the
+    same answer, "can't remember", or a negation about something else is unknown.
+    """
     t = _norm(text)
     if not t or _UNSURE.search(t):
         return None
-    if _NO.search(t):
+    has_yes, has_no = bool(_YES_WORD.search(t)), bool(_NO_WORD.search(t))
+    if has_yes and has_no:
+        return None
+    first = re.sub(r"^\W+", "", t)
+    if _NO_WORD.match(first) or _LEAD_NO.match(first):
         return False
-    if _YES.search(t):
+    if _YES_WORD.match(first) or _LEAD_YES.match(first):
         return True
+    if topic in _TOPIC and _TOPIC[topic].search(t) and _NEG.search(t):
+        return False
     return None
 
 
@@ -90,15 +118,15 @@ def parse_rules(answers: list[tuple[str, str]], profile: dict) -> TriageRecord:
     said = [a for _, a in answers if a and a.strip()]
     everything = " . ".join(_norm(a) for a in said)
 
-    head = yes_no(by_key["head"]) if "head" in by_key else None
+    head = yes_no(by_key["head"], "head") if "head" in by_key else None
     if head is None and _HIT_HEAD.search(everything):
-        head = True
+        head = not _NOT_HIT_HEAD.search(everything)
 
-    move = yes_no(by_key["move"]) if "move" in by_key else None
+    move = yes_no(by_key["move"], "move") if "move" in by_key else None
     if move is None and _CANT_MOVE.search(everything):
         move = False
 
-    bleeding = yes_no(by_key["bleeding"]) if "bleeding" in by_key else None
+    bleeding = yes_no(by_key["bleeding"], "bleeding") if "bleeding" in by_key else None
     if bleeding is None and _BLEEDING.search(everything):
         bleeding = not _NOT_BLEEDING.search(everything)
 
@@ -230,10 +258,12 @@ class StepFun:
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "temperature": 0.1,
             "max_tokens": max_tokens,
-            # TODO(verify): StepFun docs for a low-reasoning-effort parameter on step-5-preview.
+            # step-5-preview reasons before it answers; low is the fastest documented level.
+            # https://platform.stepfun.ai/docs/en/guides/models/step-5-preview
+            "reasoning_effort": "low",
         }
         if json_mode:
-            body["response_format"] = {"type": "json_object"}  # TODO(verify) supported on our key
+            body["response_format"] = {"type": "json_object"}  # verified on our key, Oct 17
         headers = {"Authorization": f"Bearer {self.api_key}"}
         fut = self._pool.submit(self._transport, self.url, headers, body, self.timeout_s)
         try:
@@ -255,7 +285,7 @@ class StepFun:
             return rules
         t0 = time.monotonic()
         try:
-            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=300)
+            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=1200)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
@@ -283,7 +313,7 @@ class StepFun:
             return text
         t0 = time.monotonic()
         try:
-            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=60).strip().strip('"')
+            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200).strip().strip('"')
             if not out:
                 raise StepFunError("empty")
             if len(out.split()) > MAX_REWRITE_WORDS:

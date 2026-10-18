@@ -5,7 +5,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 ## Phase 0: Setup and verification (until 3:00 PM Sat)
 
 - [ ] (All) Agree on roles; put names on Q1–Q10 in `IMPLEMENTATION.md` section 2
-- [ ] (A) Collect hardware + craft supplies; record accelerometer chip, NFC board, Grove shield (Q7)
+- [ ] (A) Collect hardware + craft supplies; record accelerometer chip, Grove shield (Q7)
 - [ ] (A) QNX table: board image, flashing, `oss.qnx.com` AI module, audio capture (Q2)
 - [ ] (B) StepFun key works with one call; record the matching base URL (Q4)
 - [ ] (B) FastAPI skeleton: `/health`, `models.py` contracts, `STUB_*` switches
@@ -18,31 +18,29 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Phase 1: Vertical slice with stubs (3:00 to 6:00 PM)
 
-- [ ] (B) Unlock test suite (section 9.4) written first
-- [ ] (B) `incident.py` state machine
-- [ ] (B) `POST /edge/event`, `GET /edge/commands`
-- [ ] (B) `triage.py` rule-based fallback, then StepFun path
-- [ ] (B) `unlock.py` + `security.py` signing
+- [x] (B) Unlock test suite (section 9.4) written first
+- [x] (B) `incident.py` state machine
+- [x] (B) `POST /edge/event`, `GET /edge/commands`
+- [x] (B) `triage.py` rule-based fallback, then StepFun path
+- [x] (B) `unlock.py` + `security.py` signing
 - [ ] (C) `voice.py` with cached fixed phrases
 - [ ] (C) Speech input chosen (ElevenLabs STT → sponsor provider → Web Speech API)
-- [ ] (C) Caregiver phone simulator page
+- [x] (C) Caregiver phone simulator page
 - [ ] (D) Live incident page: state badge, clock, triage card + transcript, event log, device status
-- [ ] (D) WebSocket events wired
-- [ ] (B) `scripts/simulate_fall.py`
+- [x] (D) WebSocket events wired
+- [x] (B) `scripts/simulate_fall.py`
 
 **Done when:** the 6:00 PM test in section 7 passes end to end on stubs.
 
 ## Phase 2: Hardware bring-up (3:00 to 7:00 PM, parallel)
 
-- [ ] (A) Servo test + tune `LOCK_DEG` / `UNLOCK_DEG`
-- [ ] (A) Lock prop, 10 unlocks in a row
+- [ ] (A) Simulated latch: `U` lights the latch LED, `ACK,U`, relocks after the hold time (no servo)
 - [ ] (A) Sound sensor readings noted
 - [ ] (A) Accelerometer readings noted
 - [ ] (A) Ultrasonic readings noted
-- [ ] (A) NFC UIDs recorded
 - [ ] (A) Buzzer + display by command
 - [ ] (A) QNX: shell + read Arduino serial from a script
-- [ ] (A) `sensor_node.py` fusion, tested with `sim_sensors.py`
+- [x] (A) `sensor_node.py` fusion, tested with `sim_sensors.py`
 
 ## Gate 1: QNX decision (7:00 PM)
 
@@ -76,6 +74,17 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] Backup video recorded
 - [ ] Devpost submitted by 11:00 AM, screenshot saved
 - [ ] Sponsor-specific forms (Q10)
+
+## Found in the PR review (#13)
+
+- [ ] (A) `arduino/hub/hub.ino`: no PR adds it yet (IMPLEMENTATION.md 8.3 is the starting point)
+- [ ] (A) Pi clock must be NTP-synced (or set by hand): the Pi has no RTC, and every command is refused as `stale` if its clock is >10 s off the laptop's
+- [ ] (C) `voice.py`: cached ElevenLabs audio for the fixed script (`triage.QUESTIONS`), wired into `main.speak`; #3's version is not wired and its phrases drift from 11.2
+- [ ] (C) Speech input for the person's answers (today only the typed box)
+- [ ] (C) Caregiver texts the Photon agent line once before the demo (shared lines can't text first); ask the table about a dedicated line
+- [ ] (B) `GET /edge/commands` is unauthenticated: anyone on the LAN can drain the queue (commands are signed, so this is denial, not forgery)
+- [ ] (A) Edge HTTP shares the serial loop: a blackholed backend can delay serial handling by up to `HTTP_TIMEOUT_SECONDS` once per backoff
+- [ ] (B) A late answer to Q1 after the silence escalation is filed under Q2 (now recorded as unknown, not as a wrong "no")
 
 ## Proposed
 
