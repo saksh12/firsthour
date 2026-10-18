@@ -82,14 +82,20 @@ export function extractPlainText(content: MessageContent): string | null {
 }
 
 /**
- * A genuine inbound caregiver reply: a received plain-text iMessage addressed
- * to our agent line, sent by a human (not our own outbound echo).
+ * A genuine inbound caregiver reply: a received plain-text iMessage sent by a human to
+ * one of this project's agent lines (not our own outbound echo).
+ *
+ * The line is deliberately not matched against PHOTON_AGENT_HANDLE. On a shared plan
+ * Photon assigns each caregiver a shared line when they first text, and it need not be
+ * the number the console shows (Oct 18: .env said +1...8199, every reply landed on
+ * +1...4622), so matching one handle silently dropped every real reply. listMessages is
+ * already scoped to our project, so any agent recipient is ours.
  */
-export function isCaregiverReply(msg: ReceivedMessage, agentHandle: string): boolean {
+export function isCaregiverReply(msg: ReceivedMessage): boolean {
   if (msg.platform !== "imessage" || msg.status !== "received") return false;
   if (!msg.receivedBy) return false;
   if (msg.sentBy.kind !== "human") return false;
-  if (msg.receivedBy.kind !== "agent" || msg.receivedBy.handle !== agentHandle) return false;
+  if (msg.receivedBy.kind !== "agent") return false;
   if (msg.sentBy.id === msg.receivedBy.id) return false; // never answer ourselves
   if (extractPlainText(msg.content) === null) return false;
   return true;

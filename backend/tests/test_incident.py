@@ -136,6 +136,27 @@ def test_same_fall_twice_is_ignored(m):
     assert m.incident.id == "inc-1"
 
 
+def test_a_fall_delivered_again_after_it_ended_never_reopens_it(m, rec):
+    """The Pi's outbox is at-least-once: after its uplink restarted mid-incident the same
+    fall_suspected arrived twice, and the second copy reopened a cancelled incident."""
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("I'm fine")
+    assert m.state == S.IDLE and m.was_closed("inc-1")
+    spoken = len(rec.spoken)
+    assert m.on_fall("bath-01", "inc-1") is False
+    assert m.state == S.IDLE and len(rec.spoken) == spoken and rec.alerts == []
+    assert m.on_fall("bath-01", "inc-2")  # a genuinely new fall still opens
+    assert m.incident.id == "inc-2" and not m.was_closed("inc-2")
+
+
+def test_help_button_from_another_device_is_ignored(m, rec):
+    m.on_fall("bath-01", "inc-1")
+    m.on_help_button("bath-02")
+    assert m.state == S.CHECKING and rec.alerts == []
+    m.on_help_button("bath-01")
+    assert m.state == S.ALERTING
+
+
 def test_new_fall_from_the_pi_supersedes_the_stale_incident(m, rec):
     closed = []
     m._on_close = lambda inc, final: closed.append((inc.id, final))

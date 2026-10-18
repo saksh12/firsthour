@@ -53,9 +53,13 @@ def parse_line(line):
     kind = parts[0]
     try:
         if kind == "S" and len(parts) == 7:
-            return {"kind": "S", "ms": int(parts[1]), "sound": int(float(parts[2])),
-                    "ax": float(parts[3]), "ay": float(parts[4]), "az": float(parts[5]),
-                    "dist": int(float(parts[6]))}
+            sound, ax, ay, az, dist = (float(p) for p in parts[2:])
+            # The hub prints nan/inf for a failed read. One such sample would poison the
+            # accelerometer baseline for good (no falls, or every clap a fall).
+            if not all(math.isfinite(v) for v in (sound, ax, ay, az, dist)):
+                return None
+            return {"kind": "S", "ms": int(parts[1]), "sound": int(sound),
+                    "ax": ax, "ay": ay, "az": az, "dist": int(dist)}
         if kind == "B" and len(parts) == 1:
             return {"kind": "B"}
         if kind == "ACK" and len(parts) == 2:
@@ -77,6 +81,8 @@ class AccelDelta:
 
     def update(self, ax, ay, az):
         mag = math.sqrt(ax * ax + ay * ay + az * az)
+        if not math.isfinite(mag):
+            return 0.0  # never let a bad sample into the baseline
         if self.baseline is None:
             self.baseline = mag
         delta = abs(mag - self.baseline)

@@ -84,11 +84,19 @@ export function createInboundPoll(
 ): () => Promise<void> {
   // First run ever: start a few seconds back. After that, always from the saved cursor.
   const start = new Date(Date.now() - 5000).toISOString();
+  const otherLines = new Set<string>();
 
   return async () => {
     for (const m of await gateway.listReceivedSince(state.since ?? start)) {
       if (state.seen(m.id, m.createdAt)) continue;
-      if (isCaregiverReply(m, cfg.photon.agentHandle)) {
+      if (isCaregiverReply(m)) {
+        const line = m.receivedBy?.handle ?? "";
+        if (line !== cfg.photon.agentHandle && !otherLines.has(line)) {
+          // Not an error: replies go back on this line. It only means the number
+          // caregivers were told to text (PHOTON_AGENT_HANDLE) is not the one in use.
+          otherLines.add(line);
+          console.warn(`[poller] reply received on line ${line}, not PHOTON_AGENT_HANDLE ${cfg.photon.agentHandle}`);
+        }
         gateway.remember(m.sentBy.handle, conversationOf(m));
         await forward(cfg, toBackendInbound(m));
       }

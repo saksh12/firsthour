@@ -4,11 +4,11 @@ The rules only structure what the person said. They never diagnose or advise,
 and they never guess: anything not said stays None.
 
 StepFun path (section 11.3/11.4): `StepFun.triage` asks step-5-preview to structure
-the answers, with a hard 3 s deadline, and falls back to `parse_rules` on stub mode,
-missing key, timeout, HTTP error, bad JSON or a record that fails validation.
-`StepFun.rewrite` turns a caregiver reply into one calm sentence, falling back to the
-original text. The question script, next_question/done and on_blood_thinner never
-come from the model.
+the answers in the background (45 s deadline) and falls back to `parse_rules` on stub
+mode, missing key, timeout, HTTP error, bad JSON or a record that fails validation.
+`StepFun.rewrite` turns a caregiver reply into one calm sentence (10 s, then the
+original text); `StepFun.answer` words a caregiver's question (12 s, then a template).
+The question script, next_question/done and on_blood_thinner never come from the model.
 """
 
 import json
@@ -199,7 +199,8 @@ REWRITE_SYSTEM = (
     "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud "
     "to someone who has fallen. Do not add information. Output only the sentence."
     # Measured Oct 17: without this, step-5-preview reasons for 900+ tokens (6-12 s);
-    # with it, ~20 tokens in 1-1.8 s. Undocumented, so the 3 s fallback still guards it.
+    # with it, ~20 tokens in 1-1.8 s. Oct 18 morning it reasoned 800-1200 tokens regardless
+    # (6-12 s), so the deadline is 10 s and the fallback still guards it.
     " Answer immediately. Do not think step by step."
 )
 
@@ -296,18 +297,20 @@ def _strip_fences(text: str) -> str:
 
 class StepFun:
     def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
-                 stub: bool = True, timeout_s: float = 3.0, triage_timeout_s: float = 45.0,
-                 transport: Transport = urllib_transport):
+                 stub: bool = True, timeout_s: float = 10.0, triage_timeout_s: float = 45.0,
+                 answer_timeout_s: float = 12.0, transport: Transport = urllib_transport):
         self.enabled = not stub and bool(api_key) and bool(base_url)
         if not stub and not self.enabled:
             log.warning("STUB_STEPFUN=0 but STEPFUN_API_KEY/STEPFUN_BASE_URL missing; using rules only")
         self.api_key, self.model = api_key, model
         self.url = base_url.rstrip("/") + "/chat/completions"
-        # Rewrite is spoken to the person, so it keeps a tight deadline. Triage runs in the
-        # background after the instant rule-based record (measured 5-38 s on low effort, the
-        # lowest level; it reasons through extraction whatever the prompt says, longest on
-        # unclear answers).
+        # step-5-preview always reasons before it answers (no off switch; "low" is the
+        # lowest level), measured 6-12 s on the rewrite and Q&A prompts on Oct 18. Rewrite is
+        # spoken to the person, so its deadline is the shortest we can afford; the texted
+        # answer gets a little longer; triage runs in the background after the instant
+        # rule-based record (measured 5-38 s, longest on unclear answers).
         self.timeout_s, self.triage_timeout_s = timeout_s, triage_timeout_s
+        self.answer_timeout_s = answer_timeout_s
         self._transport = transport
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
@@ -402,7 +405,7 @@ class StepFun:
         t0 = time.monotonic()
         try:
             content = self._chat(QA_SYSTEM, json.dumps({"text": question, "facts": facts}), json_mode=True,
-                                 max_tokens=1200, timeout_s=self.timeout_s * 2, pool=self._rewrite_pool)
+                                 max_tokens=1200, timeout_s=self.answer_timeout_s, pool=self._rewrite_pool)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
