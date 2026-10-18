@@ -88,14 +88,15 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Issue #21: judge-visible bugs (branch `backend/review-21-fixes`)
 
-- [ ] (B · Claude) 1. One-time unlock code is consumed on the first grant
+- [x] (B · Claude) 1. One-time unlock code is consumed on the first grant
 - [ ] (A · Devin) 2. `local_unlock` only after `ACK,U`; `unlock_failed` on timeout
 - [ ] (B · Claude / A · Devin) 3. Signed `GET /edge/commands` (backend verifies, Pi signs)
 - [ ] (C · Devin) 4. Gateway marks a reply seen only after the forward succeeds
 - [ ] (A · Devin) 5. Edge network calls off the sensor loop
 - [ ] (A · Devin) 6. Local alarm outlives the unlock window
-- [ ] (B · Claude) 7. One StepFun refinement in flight per incident
+- [x] (B · Claude) 7. One StepFun refinement in flight per incident
 - [ ] (B · Claude / A · Devin) 8. `scripts/demo_reset.sh` + signed `reset` command
+- [ ] (B) `POST /incident/resolve` has no auth: anyone on the LAN can end an incident, which sends `alarm_off` to the Pi. Gate it like `/demo/reset` or bind the backend to localhost + the Pi's IP
 
 ## Proposed
 
