@@ -4,6 +4,30 @@ For the next coding agent. Read `AGENTS.md` first (rules and contracts), then th
 
 ## Where we are
 
+### Current work: hardware only
+
+PR #32 is merged into `main`. The next branch is `edge/box3-display-alarm`.
+Its firmware compiles with Arduino ESP32 3.3.12 and pinned LovyanGFX 1.2.33.
+It adds `D,` text, simulated latch status, automatic relock display, and a pulsed
+speaker alarm. Timer boundary/rollover checks pass during compilation. The
+firmware is flashed on the BOX-3 over Mac USB. Boot reports
+`imu=ok mic=ok speaker=ok lcd=ok`, and the sensor stream continues. The operator
+confirmed `TIME DOWN 00:05` appeared and returned to `READY`. `A1` and `A0`
+acknowledged during a short alarm test, and the operator confirmed it beeped and
+stopped. The operator also confirmed `LATCH OPEN` returned to `LATCH LOCKED`
+automatically after the hold. Left locked, alarm off, `READY`. The 332 Python
+tests pass. Back on Pi USB, the real QNX edge node was started against the
+isolated port-8001 backend. Paused that backend before BOOT; the operator
+confirmed the timer kept counting, the alarm sounded, and the latch stayed
+locked. Resumed the backend; Pi incident `bath-qnx-usb-test-1792303450801`
+replayed and reached `ALERTING`. The Pi accepted signed `alarm_off` and `reset`,
+closed its local incident, and reported latch locked/alarm off. Its persistent
+outbox is empty. This tests an unreachable backend; Wi-Fi itself was not disconnected.
+
+The user explicitly scoped current work to hardware. Leave pending issues #22
+and #23 alone. Next checks are screen orientation, audible volume, clean sensor
+streaming, visible automatic relock, and then local behavior with networking gone.
+
 ### Update: Mac and QNX USB bring-up, Sat Oct 17, 10:48 PM PDT
 
 - Work is on `edge/box3-hub`. The BOX-3 enumerates on the Mac as `/dev/cu.usbmodem1101`, Espressif `303a:1001`.
