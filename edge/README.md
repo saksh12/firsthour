@@ -1,8 +1,29 @@
 # edge/
 
-The Pi-side safety node (IMPLEMENTATION.md sections 6.1–6.3, 9.3, 10). **Stdlib
-only — it runs on QNX.** `sensor_node.py` reads the Arduino's serial lines, runs
+The Pi-side safety node (IMPLEMENTATION.md sections 6.1–6.3, 9.3, 10).
+`sensor_node.py` reads the hub's sensor lines, runs
 two-sensor fusion, owns the local incident, and posts signed events to the backend.
+
+## Run the BOX-3 on QNX
+
+The Pi 5 QNX image has no USB-serial driver. The BOX-3 uses pyusb 1.3.1 and
+the `libusb` apk instead. Install the pinned Python packages in a venv using
+`edge/requirements.txt`. Keep `.env` at the repository root and use the same
+`SHARED_SECRET` as the Mac backend.
+
+```bash
+sudo apk add libusb
+sudo ~/fh-venv/bin/python edge/sensor_node.py --usb --backend http://<mac-hotspot-ip>:8000
+```
+
+The Mac backend must listen on `0.0.0.0`. Run the USB reader as root on this
+QNX image; libusb crashed when tested as an ordinary user. The transport
+handles QNX's unsupported kernel-driver query and still requires interface
+claims to succeed. See the [libusb driver-query reference](https://libusb.sourceforge.io/api-1.0/group__libusb__dev.html#ga1cabd4660a274f715eeb82de112e0779).
+
+Verified on the real BOX-3 and QNX Pi: sensor samples and acknowledgements for
+`L`, `A1`, `A0`, and `U`. The firmware still needs LCD and audible alarm output.
+The fall thresholds remain uncalibrated.
 
 ## Calibration (IMPLEMENTATION.md 10.2)
 

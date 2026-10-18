@@ -34,12 +34,14 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Phase 2: Hardware bring-up (3:00 to 7:00 PM, parallel)
 
+- [x] (A · Codex) BOX-3 Mac USB bring-up: flashed, clap/tilt readings observed, BOOT emits `B`, `U`/`L`/`A1`/`A0` acknowledge
+- [x] (A · Codex) BOX-3 QNX bring-up: 127 sensor samples; `L`/`A1`/`A0`/`U`/`L` acknowledged through raw USB; 332 tests pass
 - [ ] (A) Simulated latch: `U` lights the latch LED, `ACK,U`, relocks after the hold time (no servo)
-- [ ] (A) Sound sensor readings noted
-- [ ] (A) Accelerometer readings noted
+- [x] (A · Codex) BOX-3 microphone readings noted on Mac USB; clap/tilt capture peaked at 16013 (not calibrated)
+- [x] (A · Codex) BOX-3 accelerometer readings noted on Mac USB; near 1 g at rest, all axes change on tilt
 - [ ] (A) Ultrasonic readings noted
 - [ ] (A) Buzzer + display by command
-- [ ] (A) QNX: shell + read Arduino serial from a script
+- [x] (A · Codex) QNX: SSH shell + BOX-3 sensor samples through pyusb/libusb (no USB-serial driver)
 - [x] (A) `sensor_node.py` fusion, tested with `sim_sensors.py`
 
 ## Gate 1: QNX decision (7:00 PM)

@@ -12,7 +12,7 @@ an offline backoff, and hands commands back through a queue.
 Run on the laptop with fake sensors:
     python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin
 On the Pi:
-    python3 edge/sensor_node.py --serial /dev/<port>      # TODO(verify) QNX device path
+    sudo ~/fh-venv/bin/python edge/sensor_node.py --usb   # QNX 8: no USB-serial driver, raw libusb
 """
 
 import argparse
@@ -468,12 +468,68 @@ class SerialSource:
         self.ser.write((cmd + "\n").encode())
 
 
+class UsbCdcSource:
+    """The ESP32's USB serial port spoken to directly through libusb, because QNX 8 on the
+    Pi has no USB-serial driver (no devc-serusb). Needs pyusb + `apk add libusb`, and root:
+    libusb segfaults for other users on QNX.
+    shortcut: whole node runs as root; switch to SerialSource if QNX ships devc-serusb."""
+
+    VENDOR_ESPRESSIF = 0x303A
+    LIBUSB = "/usr/lib/libusb-1.0.so.0"  # QNX apk path; pyusb can't find it on its own
+
+    def __init__(self):
+        try:
+            import usb.backend.libusb1
+            import usb.core
+            import usb.util
+        except ImportError:
+            sys.exit("pyusb is not installed: pip install pyusb==1.3.1 (or use --serial/--stdin)")
+        self._usb = usb
+        backend = usb.backend.libusb1.get_backend(find_library=lambda _: self.LIBUSB)
+        dev = usb.core.find(idVendor=self.VENDOR_ESPRESSIF, backend=backend)
+        if dev is None:
+            sys.exit("no ESP32 on USB: check the cable is in the ESP32's USB port, then `usb` on the Pi")
+        cfg = dev.get_active_configuration()
+        comm = next(i for i in cfg if i.bInterfaceClass == 0x02)  # CDC control
+        data = next(i for i in cfg if i.bInterfaceClass == 0x0A)  # CDC data
+        for i in (comm, data):
+            try:
+                driver_active = dev.is_kernel_driver_active(i.bInterfaceNumber)
+            except NotImplementedError:
+                driver_active = False  # QNX has no kernel-driver query; claiming can still fail.
+            if driver_active:
+                dev.detach_kernel_driver(i.bInterfaceNumber)
+            usb.util.claim_interface(dev, i.bInterfaceNumber)
+        out = usb.util.ENDPOINT_OUT
+        self._in = next(e for e in data if usb.util.endpoint_direction(e.bEndpointAddress) != out)
+        self._out = next(e for e in data if usb.util.endpoint_direction(e.bEndpointAddress) == out)
+        # SET_CONTROL_LINE_STATE with DTR on, RTS off: "a host is listening". Never send
+        # RTS on with DTR off: on the ESP32's USB port that sequence resets the chip.
+        dev.ctrl_transfer(0x21, 0x22, 0x0001, comm.bInterfaceNumber)
+        self.eof = False
+        self._buf = b""
+        log.info("ESP32 on USB %04x:%04x", dev.idVendor, dev.idProduct)
+
+    def readline(self, timeout):
+        while b"\n" not in self._buf:
+            try:
+                self._buf += bytes(self._in.read(self._in.wMaxPacketSize, timeout=int(timeout * 1000)))
+            except self._usb.core.USBTimeoutError:
+                return None
+        line, self._buf = self._buf.split(b"\n", 1)
+        return line.decode(errors="replace")
+
+    def write(self, cmd):
+        self._out.write((cmd + "\n").encode(), timeout=500)
+
+
 def main():
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--stdin", action="store_true", help="read sensor lines from stdin (sim_sensors.py)")
     src.add_argument("--serial", metavar="PORT", nargs="?", const=config.SERIAL_PORT,
                      help="Arduino serial port (default: SERIAL_PORT from .env)")
+    src.add_argument("--usb", action="store_true", help="ESP32 over raw USB (QNX: no serial driver; run as root)")
     ap.add_argument("--backend", default=config.BACKEND_URL)
     ap.add_argument("--offline", action="store_true", help="never contact the backend")
     ap.add_argument("--no-ack", action="store_true", help="with --stdin: the fake latch never answers ACK,U")
@@ -487,9 +543,14 @@ def main():
     fh.setFormatter(logging.Formatter(fmt))
     logging.getLogger().addHandler(fh)
 
-    if not args.stdin and not args.serial:
-        sys.exit("no serial port: pass --serial PORT or set SERIAL_PORT in .env")
-    source = StdinSource(auto_ack=not args.no_ack) if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
+    if args.stdin:
+        source = StdinSource(auto_ack=not args.no_ack)
+    elif args.usb:
+        source = UsbCdcSource()
+    elif args.serial:
+        source = SerialSource(args.serial, config.SERIAL_BAUD)
+    else:
+        sys.exit("no serial port: pass --serial PORT, --usb, or set SERIAL_PORT in .env")
     node = Node(
         device_id=config.DEVICE_ID, secret=config.SHARED_SECRET,
         write_serial=source.write,
