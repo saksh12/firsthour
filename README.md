@@ -8,7 +8,7 @@ A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Ard
 
 ## Status
 
-Last updated Sat Oct 17, 7:38 PM.
+Last updated Sat Oct 17, 8:10 PM.
 
 | Status | Meaning |
 | --- | --- |
@@ -21,7 +21,7 @@ Last updated Sat Oct 17, 7:38 PM.
 | Moment | What judges see | Status | What's missing |
 | --- | --- | --- | --- |
 | M1 The thud | Clock starts, sensors spike | 🔶 Works with the fake Arduino | Arduino sketch, real sensors, calibration |
-| M2 The voice | "Are you okay?" spoken, triage follows | 🔶 Audio pipeline works | Fixed phrases pre-cached and play on macOS (afplay/say fallback); needs a run on the demo laptop with the real key. No speech input yet (typed box only) |
+| M2 The voice | "Are you okay?" spoken, triage follows | 🔶 Audio pipeline works | Says "This is an automated assistant" first; the 8 s silence timer starts when the question has finished playing (checked with macOS `say`). Needs a run with the real ElevenLabs key. Speech input in review (#28) |
 | M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test |
 | M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ Unlock rules, signing, door shows the Pi's confirmation | Arduino sketch (simulated latch, no servo) |
 | M5 Offline | Wi-Fi off: alarm and clock keep going | 🔶 Covered by tests | Real hardware run |
@@ -33,16 +33,17 @@ Last updated Sat Oct 17, 7:38 PM.
 | `backend/` state machine | `IDLE → CHECKING → ALERTING → RESPONDING → UNLOCKED → RESOLVED` | ✅ | Escalation never waits on StepFun |
 | `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ | Full test suite |
 | `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say |
-| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Measured 5-7 s per call, so the 3 s timeout always falls back; timeout decision pending |
+| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Triage runs in the background (15 s, one call at a time per incident) after the instant rule record; the reply rewrite has its own pool and a 3 s deadline |
 | `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
-| `backend/` voice | Speak the fixed questions and caregiver replies | 🔶 | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; verified end-to-end against a mock endpoint, real-key run pending |
+| `backend/` voice | Speak the fixed questions and caregiver replies | 🔶 | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends; real-key run pending |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
-| `edge/` on the Pi | Same code on QNX over USB serial | ⬜ | Gate 1 at 7:00 PM: QNX or Linux |
+| `edge/` on the Pi | Same code on QNX over USB serial | ⬜ | Pi 5. QNX's sources say: `whisper.cpp`/`onnxruntime` prebuilt, USB audio only, no HAM, and Arduino USB-serial may not auto-load (test `ls /dev/ser*` first). Details in #22 |
 | `arduino/hub.ino` | Sensors, simulated latch (LED), buzzer, display | ⬜ | Need accelerometer chip and display type |
-| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first |
+| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first (a blocked alert is resent on their first text). HMAC inbound auth in review (#14) |
+| Phone calls | Photon SMS number → ElevenLabs agent over SIP | 🔶 | Test calls in and out passed; the backend doesn't place the escalation call yet (#23) |
 | `dashboard/` | Live incident page: state, clock, triage + transcript, unlock log | ✅ | Door shows the Pi's confirmation |
 | Caregiver simulator | Stand-in phone for the demo | ✅ | `dashboard/caregiver-simulator.html` |
-| `scripts/simulate_fall.py` | Whole story end to end on stubs | ✅ | Passes |
+| `scripts/simulate_fall.py` | Whole story end to end on stubs | ✅ | Passes; `--silent` prints how long escalation took |
 | `scripts/demo_reset.sh` | One-command reset between runs | ✅ | Backend to IDLE + signed `reset` to the Pi; 3 back-to-back `simulate_fall.py` runs pass |
 | Calibration | Thresholds from ~20 trials per action | ⬜ | Tool in review (#15); placeholder numbers in `edge/config.py` |
 | Handoff sheet page | Paramedic summary | ⬜ | |
@@ -69,6 +70,14 @@ Other changes:
 - A caregiver reply survives a gateway forward failing once.
 - StepFun runs one triage call at a time.
 
+### Changed in #27 and #29
+
+- The voice says "This is an automated assistant." before "Are you okay?".
+- The 8 s silence timer starts when the question has finished playing, so with sound on, silence escalates about 15 s after the fall. The backend log line `silence timer: …` shows the split.
+- Lines still queued when an incident ends are dropped.
+- If Photon refuses an alert because the caregiver hasn't texted the line yet, the dashboard says so and the alert goes out on their first text.
+- `pytest` no longer sends issues to the real Sentry project. If you got Sentry emails from test runs, that was the cause.
+
 ### Keys in `.env` (checked with real calls)
 
 | Key | Status |
@@ -79,6 +88,8 @@ Other changes:
 | `PHOTON_TOKEN`, `PHOTON_PROJECT_ID`, `PHOTON_AGENT_HANDLE` | ✅ Read-only call works |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | ✅ Free tier (no cloning); stock voice "Sarah" |
 | `CAREGIVER_NUMBERS` | ✅ Real phone; it must text the agent line once |
+| `PHOTON_SMS_NUMBER`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID` | ✅ Test calls both ways passed (Anmol's `.env`; added to `.env.example` with the code that reads them) |
+| `PHOTON_SIP_OUTBOUND_PASSWORD` | ⚠️ Rotate it: it appeared in a setup tool log |
 | `SERIAL_PORT` | ⬜ When the Arduino arrives |
 
 ## Run it locally (no hardware)
