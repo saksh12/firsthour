@@ -63,6 +63,9 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (A) Offline test + reconnect replay
 - [ ] (A) Calibration done, thresholds committed in `edge/config.py`
 - [x] (A · Codex) Record face-up BOX-3 bottle impacts on the same table: 19 clean trials, box-fall trial excluded; provisional Pi-only demo sensitivity selected from replay (`edge/box3-calibration`). Independent non-fall checks and human-fall validation remain pending.
+- [x] (A · Codex) Isolate QNX native USB aborts from the safety process (`edge/box3-usb-recovery`): helper SIGKILL and physical BOX RST recover with the same parent PID; operator also confirmed alarm/timer resume during an open incident, then signed reset clears it. 347 tests pass; unlocks are never replayed.
+- [x] (A · Codex) Consolidate verified Mac, QNX Pi 5 and BOX-3 connection/reset instructions in root `connect.md`, including limits for agents running off the local network. Local links and shell syntax checked.
+- [ ] (A) Improve fusion diagnostics: current logs/event sensors show the sample at detection, which can have low acceleration or sound when the other sensor crossed earlier within 400 ms. Log the matched peaks and timing to make calibration evidence clear.
 - [ ] (A) False-alarm check: __ of 20 non-falls triggered the voice check
 - [ ] (D) Dashboard polish, handoff sheet, phone view
 - [ ] (D) `docs/sentry-story.md` with one real finding

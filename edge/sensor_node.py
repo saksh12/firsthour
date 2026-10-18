@@ -19,8 +19,10 @@ import argparse
 import json
 import logging
 import math
+import os
 import queue
 import select
+import subprocess
 import sys
 import threading
 import time
@@ -223,6 +225,9 @@ class Node:
     # inputs ---------------------------------------------------------------
 
     def handle_line(self, line):
+        if line.startswith("I,box3 "):
+            self.hardware_reconnected()
+            return
         msg = parse_line(line)
         if msg is None:
             if line.strip():
@@ -401,6 +406,23 @@ class Node:
         log.info("latch confirmed incident_id=%s", p["incident_id"])
         self._queue("local_unlock")
 
+    def hardware_reconnected(self) -> None:
+        """Restore local outputs after a hub reset, without replaying an unlock."""
+        self._write("L")
+        if self._pending_unlock:
+            self._pending_unlock = None
+            self._queue("unlock_failed")
+            log.warning("unlock failed: hub disconnected before confirmation")
+        self.accel = AccelDelta()
+        # Keep last_ms so Fusion still detects a restarted hub clock and clears its cooldown.
+        self.fusion.last_sound = self.fusion.last_accel = None
+        self._write("A1" if self.incident else "A0")
+        self._display = None
+        self._show("TIME DOWN " + format_down(self._clock() - self.incident["opened_at"])
+                   if self.incident else "READY")
+        log.info("hub reconnected: latch locked, local incident=%s",
+                 self.incident["id"] if self.incident else "none")
+
     def _reset(self):
         """Demo reset between runs. Never ends a live incident: alarm_off does that."""
         if self.incident:
@@ -485,10 +507,20 @@ class UsbCdcSource:
         except ImportError:
             sys.exit("pyusb is not installed: pip install pyusb==1.3.1 (or use --serial/--stdin)")
         self._usb = usb
-        backend = usb.backend.libusb1.get_backend(find_library=lambda _: self.LIBUSB)
-        dev = usb.core.find(idVendor=self.VENDOR_ESPRESSIF, backend=backend)
+        self._backend = usb.backend.libusb1.get_backend(find_library=lambda _: self.LIBUSB)
+        self._dev = None
+        self._retry_at = 0.0
+        self._buf = b""
+        self.eof = False
+        if not self._connect():
+            raise FileNotFoundError("no ESP32 on USB: check the hub cable")
+
+    def _connect(self):
+        usb = self._usb
+        dev = usb.core.find(idVendor=self.VENDOR_ESPRESSIF, backend=self._backend)
         if dev is None:
-            sys.exit("no ESP32 on USB: check the cable is in the ESP32's USB port, then `usb` on the Pi")
+            return False
+        self._dev = dev
         cfg = dev.get_active_configuration()
         comm = next(i for i in cfg if i.bInterfaceClass == 0x02)  # CDC control
         data = next(i for i in cfg if i.bInterfaceClass == 0x0A)  # CDC data
@@ -506,22 +538,161 @@ class UsbCdcSource:
         # SET_CONTROL_LINE_STATE with DTR on, RTS off: "a host is listening". Never send
         # RTS on with DTR off: on the ESP32's USB port that sequence resets the chip.
         dev.ctrl_transfer(0x21, 0x22, 0x0001, comm.bInterfaceNumber)
-        self.eof = False
         self._buf = b""
         log.info("ESP32 on USB %04x:%04x", dev.idVendor, dev.idProduct)
+        return True
+
+    def _disconnected(self, error):
+        # IO, NO_DEVICE, TIMEOUT and PIPE can accompany reset; access/busy errors must fail.
+        if error.backend_error_code not in (-1, -4, -7, -9):
+            raise error
+        dev, self._dev = self._dev, None
+        self._buf = b""
+        self._retry_at = time.monotonic() + 1.0
+        if dev is not None:
+            self._usb.util.dispose_resources(dev)
+        log.warning("hub USB unavailable (%s); waiting to reconnect", error)
+
+    def reconnect(self) -> bool:
+        """True once a lost device is reclaimed; never buffers or retries commands."""
+        if self._dev is not None or time.monotonic() < self._retry_at:
+            return False
+        self._retry_at = time.monotonic() + 1.0
+        try:
+            return self._connect()
+        except self._usb.core.USBError as error:
+            self._disconnected(error)
+            return False
 
     def readline(self, timeout):
+        if self._dev is None:
+            time.sleep(timeout)
+            return None
         while b"\n" not in self._buf:
             try:
                 # libusb treats zero as an infinite wait; calibration also polls with timeout=0.
                 self._buf += bytes(self._in.read(self._in.wMaxPacketSize, timeout=max(1, int(timeout * 1000))))
             except self._usb.core.USBTimeoutError:
                 return None
+            except self._usb.core.USBError as error:
+                self._disconnected(error)
+                return None
         line, self._buf = self._buf.split(b"\n", 1)
         return line.decode(errors="replace")
 
     def write(self, cmd):
-        self._out.write((cmd + "\n").encode(), timeout=500)
+        if self._dev is None:
+            log.warning("hub unavailable: command %s not sent", cmd.split(",", 1)[0])
+            return
+        try:
+            self._out.write((cmd + "\n").encode(), timeout=500)
+        except self._usb.core.USBError as error:
+            self._disconnected(error)
+
+
+class UsbWorkerSource:
+    """Keep native USB aborts outside the process that owns incident/security state."""
+
+    def __init__(self) -> None:
+        self.eof = False
+        self._proc = None
+        self._retry_at = 0.0
+        self._buf = b""
+        self._ready = False
+
+    def reconnect(self) -> None:
+        if self._proc is not None:
+            status = self._proc.poll()
+            if status is None:
+                return
+            self._proc.stdin.close()
+            self._proc.stdout.close()
+            self._proc = None
+            self._ready = False
+            self._buf = b""
+            if status > 0 and status not in (75, 134):
+                raise RuntimeError(f"USB worker failed with status {status}; see its error log")
+            log.warning("USB worker exited status=%s; restarting without clearing local incident", status)
+            self._retry_at = time.monotonic() + 1.0
+        if time.monotonic() < self._retry_at:
+            return
+        self._proc = subprocess.Popen(
+            [sys.executable, "-u", str(Path(__file__).resolve()), "--usb-worker"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
+        )
+        os.set_blocking(self._proc.stdin.fileno(), False)
+        # Outputs are restored only after the worker confirms it has claimed USB.
+
+    def readline(self, timeout: float) -> str | None:
+        if self._proc is None:
+            time.sleep(timeout)
+            return None
+        while b"\n" not in self._buf:
+            ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+            if not ready:
+                return None
+            chunk = os.read(self._proc.stdout.fileno(), 4096)
+            if not chunk:
+                return None
+            self._buf += chunk
+        line, self._buf = self._buf.split(b"\n", 1)
+        text = line.decode(errors="replace")
+        if text.startswith("I,box3 "):
+            self._ready = True
+        return text
+
+    def write(self, cmd: str) -> None:
+        if not self._ready or self._proc is None or self._proc.poll() is not None:
+            log.warning("USB worker unavailable: command %s not sent", cmd.split(",", 1)[0])
+            return
+        raw = (cmd + "\n").encode()
+        try:
+            if os.write(self._proc.stdin.fileno(), raw) != len(raw):
+                raise BlockingIOError("partial command")
+        except (BrokenPipeError, BlockingIOError):
+            # Never queue an unlock for a future helper or let a stuck helper block the Pi.
+            self._ready = False
+            self._proc.kill()
+            log.error("USB worker command pipe failed; command not retried")
+
+    def close(self) -> None:
+        if self._proc is not None:
+            if self._proc.poll() is None:
+                self._proc.kill()
+            self._proc.wait()
+            self._proc.stdin.close()
+            self._proc.stdout.close()
+
+
+def _usb_worker() -> int:
+    """Only this helper loads libusb. It has no incident or unlock-decision logic."""
+    try:
+        source = UsbCdcSource()
+    except FileNotFoundError:
+        log.warning("BOX-3 is not on USB yet")
+        return 75
+    except OSError as error:
+        if getattr(error, "backend_error_code", None) not in (-1, -4, -7, -9):
+            raise
+        log.warning("BOX-3 is not ready: %s", error)
+        return 75
+    print("I,box3 usb=connected", flush=True)
+    pending = b""
+    while True:
+        if source.reconnect():
+            print("I,box3 usb=reconnected", flush=True)
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if ready:
+            data = os.read(sys.stdin.fileno(), 4096)
+            if not data:
+                return 0
+            pending += data
+            while b"\n" in pending:
+                cmd, pending = pending.split(b"\n", 1)
+                source.write(cmd.decode())
+        line = source.readline(0.05)
+        if line:
+            print(line, flush=True)
 
 
 def main():
@@ -531,6 +702,7 @@ def main():
     src.add_argument("--serial", metavar="PORT", nargs="?", const=config.SERIAL_PORT,
                      help="Arduino serial port (default: SERIAL_PORT from .env)")
     src.add_argument("--usb", action="store_true", help="ESP32 over raw USB (QNX: no serial driver; run as root)")
+    src.add_argument("--usb-worker", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--backend", default=config.BACKEND_URL)
     ap.add_argument("--offline", action="store_true", help="never contact the backend")
     ap.add_argument("--no-ack", action="store_true", help="with --stdin: the fake latch never answers ACK,U")
@@ -540,6 +712,8 @@ def main():
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=logging.INFO, format=fmt, stream=sys.stderr)
+    if args.usb_worker:
+        sys.exit(_usb_worker())
     fh = logging.FileHandler(config.LOG_DIR / "events.log")  # local audit trail, kept offline
     fh.setFormatter(logging.Formatter(fmt))
     logging.getLogger().addHandler(fh)
@@ -547,7 +721,7 @@ def main():
     if args.stdin:
         source = StdinSource(auto_ack=not args.no_ack)
     elif args.usb:
-        source = UsbCdcSource()
+        source = UsbWorkerSource()
     elif args.serial:
         source = SerialSource(args.serial, config.SERIAL_BAUD)
     else:
@@ -562,6 +736,8 @@ def main():
     node.start_network()
     try:
         while True:
+            if args.usb:
+                source.reconnect()
             line = source.readline(0.05)
             if line:
                 node.handle_line(line)
@@ -570,6 +746,13 @@ def main():
                 break
     except KeyboardInterrupt:
         pass
+    except Exception:
+        log.exception("edge reader stopped")
+        raise
+    finally:
+        node.stop_network()
+        if args.usb:
+            source.close()
 
 
 if __name__ == "__main__":
