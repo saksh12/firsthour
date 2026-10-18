@@ -281,6 +281,16 @@ def carry_forward(older: TriageRecord, rules: TriageRecord) -> TriageRecord:
     return rec
 
 
+def apply_corrections(rec: TriageRecord, corrections: dict[str, Any]) -> TriageRecord:
+    """The operator's corrections win over the rules and the model. The summary is then
+    templated from the corrected record, since any other summary says what was misread."""
+    if not corrections:
+        return rec
+    out = rec.model_copy(update=corrections)
+    out.summary = summarize(out)
+    return out
+
+
 class StepFunError(Exception):
     pass
 

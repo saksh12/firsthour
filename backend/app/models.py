@@ -5,9 +5,9 @@ All timestamps are UTC epoch milliseconds.
 """
 
 from enum import Enum
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
 
 # --- 6.2 Edge to backend -----------------------------------------------------
 
@@ -92,6 +92,36 @@ class TriageRecord(BaseModel):
     done: bool = False
 
 
+# Fields the operator may correct. on_blood_thinner comes from the profile; summary,
+# next_question and done follow from the record and the fixed script.
+CorrectableField = Literal["conscious", "head_strike", "pain_location", "can_move", "bleeding"]
+
+
+class TriageCorrection(BaseModel):
+    """POST /triage/correct: the operator sets one field of the record in use.
+
+    Yes/no fields take true, false or null (unknown). pain_location takes a short string;
+    empty or null means unknown."""
+
+    model_config = ConfigDict(extra="forbid")
+    field: CorrectableField
+    value: Union[StrictBool, StrictStr, None]
+
+    @model_validator(mode="after")
+    def _type_matches_field(self) -> "TriageCorrection":
+        if self.field == "pain_location":
+            if isinstance(self.value, bool):
+                raise ValueError("pain_location takes a string or null")
+            if isinstance(self.value, str):
+                v = " ".join(self.value.split())
+                if len(v) > 40:
+                    raise ValueError("pain_location is at most 40 characters")
+                self.value = v or None
+        elif isinstance(self.value, str):
+            raise ValueError(f"{self.field} takes true, false or null")
+        return self
+
+
 # --- 6.6 Caregiver messages --------------------------------------------------
 
 
@@ -151,7 +181,7 @@ class StepFunTriageView(BaseModel):
     status: "off" (rules only), "waiting" (no answer yet), "pending" (a call is running),
     or the last finished call's outcome. record/ms/answers_seen describe that last finished
     call; while pending they still show it. added: fields where the record in use differs from
-    the rules (the model added them). overruled: fields where the model said something the
+    the rules (the model added them; never a field the operator corrected). overruled: fields where the model said something the
     record in use does not (the rules kept their answer)."""
 
     name: Optional[str] = None
