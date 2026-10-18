@@ -132,9 +132,9 @@ def test_resolve_endpoint(client):
 
 def test_caregiver_message_is_read_aloud(client):
     escalate(client)
-    r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "I'm 2 minutes away"}).json()
+    r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "Hang in there, I love you"}).json()
     assert r == {"type": "message", "accepted": True}
-    assert client.app.state.spoken[-1] == "I'm 2 minutes away"
+    assert client.app.state.spoken[-1] == "Hang in there, I love you"
     assert client.get("/incident").json()["state"] == "RESPONDING"
     assert signed_poll(client).json() == {"commands": []}
 

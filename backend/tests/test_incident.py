@@ -175,10 +175,10 @@ def test_later_answers_update_triage_and_walk_the_script(m, rec):
 def test_caregiver_message_moves_to_responding_and_is_read_aloud(m, rec):
     m.on_fall("bath-01", "inc-1")
     m.on_answer("help")
-    r = m.caregiver_reply(CAREGIVER, "I'm 2 minutes away")
+    r = m.caregiver_reply(CAREGIVER, "Hang in there, I love you")
     assert r == {"type": "message", "accepted": True}
     assert m.state == S.RESPONDING
-    assert rec.spoken[-1] == "I'm 2 minutes away"
+    assert rec.spoken[-1] == "Hang in there, I love you"
 
 
 def test_stranger_message_is_dropped_and_not_read_aloud(m, rec):

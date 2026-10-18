@@ -329,7 +329,7 @@ The signature covers the whole body, so a captured reply can be resent inside th
 
 ### 6.7 Dashboard live events (WebSocket from backend)
 
-`incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying). The first snapshot also carries `pi_stt` (true when `PI_STT=1`).
+`incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying). The first snapshot also carries `pi_stt` (true when `PI_STT=1`). From issue #23: `delivery_status` (`queued` → `sent` = Photon API accepted → `acknowledged` = caregiver replied → `responder_assigned`; `blocked`/`failed` on errors; no delivered/read), `responder_update` (`accepted` | `arriving` + `eta_min` | `arrived`, `assigned` for the first claim), `call_update` (`dialing` | `placed` | `failed` | `completed` + summary).
 
 ### 6.8 Speech-to-text on the Pi (QNX AI module: whisper.cpp)
 

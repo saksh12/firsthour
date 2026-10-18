@@ -240,10 +240,10 @@ def test_app_uses_stepfun_for_triage_and_reply():
         time.sleep(0.01)
     assert snap["triage"]["summary"] == GOOD["summary"]
     assert snap["triage"]["on_blood_thinner"] is True
-    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "omw"})
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "hang tight, love you"})
     assert c.app.state.spoken[-1] == "Help is on the way."
     ev = [e for e in c.app.state.events if e.type == "message_in"][-1]
-    assert ev.data["text"] == "omw" and ev.data["spoken"] == "Help is on the way."
+    assert ev.data["text"] == "hang tight, love you" and ev.data["spoken"] == "Help is on the way."
 
 
 def test_app_default_is_rules_only():

@@ -158,9 +158,9 @@ Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
 **Triage record** (StepFun output, pydantic-validated): `conscious, head_strike, pain_location, can_move, bleeding, on_blood_thinner, summary, next_question, done`. Unknown = `null`, never a guess.
 
-**Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud.
+**Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. A clear "on my way" / ETA / "I'm here" (regex, `backend/app/coordinator.py`; hedges like "I might come" never count) claims the incident and is read aloud from a fixed template. A question (StepFun, `?` fallback) is answered by text from incident facts only, never the code. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud. Nothing said on a voice call is ever an unlock.
 
-**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`, `question_played`, `speech_heard`, `voice_line`.
+**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`, `question_played`, `speech_heard`, `voice_line`, `delivery_status {status: queued|sent|blocked|failed|acknowledged|responder_assigned}`, `responder_update`, `call_update` (issue #23; "sent" = Photon API accepted, never "delivered").
 
 ## Unlock rules (non-negotiable; judges will poke at this)
 

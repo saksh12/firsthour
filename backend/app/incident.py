@@ -6,6 +6,10 @@ Rules that must not change:
   cancelled check never produces a usable code.
 - Only enrolled caregivers move the state or get read aloud. A stranger's text
   is logged and dropped.
+- Caregiver coordination (issue #23) is deterministic: regexes decide who claimed the
+  incident and their ETA, timers decide when to call. A model only words Q&A answers,
+  from incident facts that never include the unlock code. Nothing heard on a call
+  is ever parsed as an unlock.
 - Nothing slow runs under the lock: tick() runs on the event loop, so StepFun calls
   happen outside it and their result is applied only if it is still current.
 """
@@ -17,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .comms import format_alert
+from .coordinator import (Commitment, claimer_reply, incident_facts, is_question, parse_commitment,
+                          spoken_line, stand_by_text, status_answer)
 from .models import IncidentState as S
 from .models import TriageRecord
 from .triage import QUESTIONS, carry_forward, is_clear_fine, parse_rules
@@ -39,10 +45,20 @@ class Incident:
     triage: TriageRecord = field(default_factory=TriageRecord)
     unlocked_until: Optional[float] = None
     refining: bool = False  # a StepFun refinement is in flight
+    alerted_at: Optional[float] = None
+    responders: dict[str, dict] = field(default_factory=dict)  # number -> status, eta_min, name
+    claimed_by: Optional[str] = None  # first clear "on my way"
+    calls: list[str] = field(default_factory=list)  # numbers called, in order
+    last_call_at: Optional[float] = None
+    call_notes: list[str] = field(default_factory=list)
 
 
 def _noop(*_args) -> None:
     pass
+
+
+def _template_answer(_question: str, facts: dict) -> tuple[str, str]:
+    return "answer", status_answer(facts)
 
 
 def _in_thread(fn: Callable[[], None]) -> None:
@@ -70,6 +86,12 @@ class IncidentMachine:
         triage_fn: Callable[[list, dict], TriageRecord] = parse_rules,
         rewrite_fn: Callable[[str], str] = lambda text: text,
         background: Callable[[Callable[[], None]], None] = _in_thread,
+        send_text: Callable[[str, list[str], str, str], None] = _noop,
+        place_call: Callable[[str, str, dict], None] = _noop,
+        answer_fn: Callable[[str, dict], tuple[str, str]] = _template_answer,
+        call_order: Optional[list[str]] = None,
+        names: Optional[dict[str, str]] = None,
+        call_after_s: Optional[float] = 20,
     ):
         self.guard = guard
         self.profile = profile
@@ -87,6 +109,13 @@ class IncidentMachine:
         self._triage_fn = triage_fn  # StepFun with rule fallback, or rules only
         self._rewrite_fn = rewrite_fn
         self._background = background  # runs the StepFun refinement; tests pass a synchronous one
+        self._send_text = send_text  # (incident_id, to, text, kind); never the code
+        self._place_call = place_call  # (incident_id, number, variables); must not block
+        self._answer_fn = answer_fn  # StepFun Q&A with templated fallback
+        # Called in this order when nobody claims: primary first, then the backups.
+        self.call_order = [n for n in (call_order or sorted(guard.allowed)) if n in guard.allowed]
+        self.names = names or {}
+        self.call_after_s = call_after_s  # None: no voice escalation
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
         self._question_heard_at: Optional[float] = None
@@ -122,7 +151,14 @@ class IncidentMachine:
             "transcript": [{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
             "answered": _answered(inc),
             "triage": inc.triage.model_dump(),
+            "responders": self._responders(inc),
+            "calls": len(inc.calls),
         }
+
+    def facts(self) -> Optional[dict]:
+        """Read-only incident facts for Q&A and the voice agent. No unlock code."""
+        with self._lock:
+            return self._facts(self.incident) if self.incident else None
 
     # --- inputs -------------------------------------------------------------
 
@@ -261,6 +297,25 @@ class IncidentMachine:
                 log.info("caregiver message with no incident sender=%s", sender)
                 return {"type": "message", "accepted": False, "reason": "no active incident"}
 
+            self._acknowledge(inc, sender)
+            commitment = parse_commitment(text)
+            if commitment:
+                self._emit("message_in", {"sender": sender, "text": text, "spoken": None,
+                                          "incident_id": inc.id})
+                return self._commit(inc, sender, commitment)
+            facts = self._facts(inc) if is_question(text) else None
+
+        if facts is not None:
+            kind, answer = self._answer_fn(text, facts)  # StepFun: a few s, then the template
+            if kind == "answer":
+                with self._lock:
+                    if self.incident is not inc:
+                        return {"type": "message", "accepted": False, "reason": "no active incident"}
+                    self._emit("message_in", {"sender": sender, "text": text, "spoken": None,
+                                              "question": True, "incident_id": inc.id})
+                    self._send_text(inc.id, [sender], answer, "answer")
+                    return {"type": "question", "accepted": True}
+
         spoken = self._rewrite_fn(text)  # StepFun: up to 3 s, then the original text
 
         with self._lock:
@@ -274,6 +329,27 @@ class IncidentMachine:
                 self._set(S.RESPONDING, "caregiver replied")
             self._speak(spoken)
             return {"type": "message", "accepted": True}
+
+    def record_call_result(self, incident_id: Optional[str], number: Optional[str],
+                           user_turns: list[str], summary: str) -> dict:
+        """A finished call (post-call webhook). Only a call we placed to an enrolled number can
+        record a commitment; caller ID alone never does. Nothing said is parsed as an unlock."""
+        with self._lock:
+            inc = self.incident
+            if not inc or inc.id != incident_id:
+                return {"accepted": False, "reason": "no matching incident"}
+            if summary:
+                inc.call_notes.append(summary)
+            self._emit("call_update", {"incident_id": inc.id, "status": "completed",
+                                       "name": self.names.get(number or ""), "summary": summary})
+            commitment = None
+            if number in self.guard.allowed:
+                for turn in user_turns:
+                    commitment = parse_commitment(turn) or commitment
+            if not commitment:
+                return {"accepted": True, "commitment": None}
+            self._acknowledge(inc, number)
+            return self._commit(inc, number, commitment, via_call=True)
 
     def resolve(self, by: str = "caregiver") -> bool:
         with self._lock:
@@ -330,6 +406,7 @@ class IncidentMachine:
             elif inc.state == S.UNLOCKED and inc.unlocked_until and now >= inc.unlocked_until:
                 inc.unlocked_until = None
                 self._set(S.RESPONDING, "unlock hold ended")
+            self._maybe_call(inc, now)
 
     # --- internals ----------------------------------------------------------
 
@@ -352,9 +429,79 @@ class IncidentMachine:
                                      "answered": _answered(inc),
                                      "current_question": self._current_question()})
 
+    def _responders(self, inc: Incident) -> list[dict]:
+        return [{"number": n, **r, "assigned": n == inc.claimed_by} for n, r in inc.responders.items()]
+
+    def _facts(self, inc: Incident) -> dict:
+        return incident_facts(
+            profile=self.profile, state=inc.state.value, down_s=self._clock() - inc.opened_at,
+            triage=inc.triage, transcript=[{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
+            responders=list(inc.responders.values()), call_notes=list(inc.call_notes))
+
+    def _acknowledge(self, inc: Incident, sender: str) -> None:
+        if sender not in inc.responders:
+            inc.responders[sender] = {"name": self.names.get(sender), "status": "acknowledged",
+                                      "eta_min": None}
+            self._emit("delivery_status", {"to": [sender], "incident_id": inc.id, "status": "acknowledged"})
+
+    def _commit(self, inc: Incident, sender: str, c: Commitment, via_call: bool = False) -> dict:
+        r = inc.responders[sender]
+        r["status"] = c.status
+        if c.eta_min is not None:
+            r["eta_min"] = c.eta_min
+        first = inc.claimed_by is None
+        if first:
+            inc.claimed_by = sender
+        self._emit("responder_update", {"incident_id": inc.id, "number": sender, **r,
+                                        "assigned": inc.claimed_by == sender, "via": "call" if via_call else "text"})
+        if inc.state == S.ALERTING:
+            self._set(S.RESPONDING, "caregiver claimed" if first else "caregiver replied")
+        self._speak(spoken_line(r["name"], Commitment(c.status, r["eta_min"])))
+        self._send_text(inc.id, [sender], claimer_reply(Commitment(c.status, r["eta_min"]), via_call), "ack")
+        if first:
+            self._emit("delivery_status", {"to": [sender], "incident_id": inc.id, "status": "responder_assigned"})
+            others = sorted(self.guard.allowed - {sender})
+            if others:
+                self._send_text(inc.id, others, stand_by_text(r["name"]), "stand_by")
+        return {"type": "commitment", "accepted": True, "status": c.status, "eta_min": r["eta_min"],
+                "assigned": inc.claimed_by == sender}
+
+    def _maybe_call(self, inc: Incident, now: float) -> None:
+        """Voice escalation: nobody claimed within call_after_s of the alert (or of the last call),
+        or the person hit their head. One call per number, primary first."""
+        if (self.call_after_s is None or inc.alerted_at is None or inc.claimed_by is not None
+                or inc.state not in (S.ALERTING, S.RESPONDING) or len(inc.calls) >= len(self.call_order)):
+            return
+        since = inc.last_call_at if inc.last_call_at is not None else inc.alerted_at
+        head = inc.triage.head_strike is True and not inc.calls
+        if not head and now - since < self.call_after_s:
+            return
+        number = self.call_order[len(inc.calls)]
+        inc.calls.append(number)
+        inc.last_call_at = now
+        reason = "head strike" if head else f"no claim for {self.call_after_s:g} s"
+        log.info("voice escalation call #%d reason=%s incident_id=%s", len(inc.calls), reason, inc.id)
+        self._emit("call_update", {"incident_id": inc.id, "status": "dialing", "reason": reason,
+                                   "name": self.names.get(number), "attempt": len(inc.calls)})
+        self._place_call(inc.id, number, self._call_variables(inc))
+
+    def _call_variables(self, inc: Incident) -> dict:
+        f = self._facts(inc)
+        return {
+            "incident_id": inc.id,
+            "patient_name": f["patient"],
+            "room": f["room"],
+            "time_down": f["time_down"],
+            "triage_summary": f["triage_summary"],
+            "on_blood_thinner": "yes" if f["on_blood_thinner"] else "no",
+            "last_answer": f["last_answer"] or "",
+            "eta_question": "How many minutes until you can be at the door?",
+        }
+
     def _escalate(self, reason: str) -> None:
         inc = self.incident
         code = self.guard.open_incident(inc.id)
+        inc.alerted_at = self._clock()
         self._set(S.ALERTING, reason)
         self._send_alert(inc.id, format_alert(self.profile, self._clock() - inc.opened_at, inc.triage, code))
 

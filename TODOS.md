@@ -120,6 +120,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 ## Other done since #25
 
 - [x] (B · Claude) pytest never reports to the real Sentry project (#29): local runs were filing issues and emails
+- [ ] (C, Devin for Manya) #23 caregiver coordinator: durable inbound cursor, multi-caregiver claim/ETA, Q&A, honest delivery states, ElevenLabs escalation call + signed post-call webhook. Tick after the Mac + Pi + BOX-3 check in docs/manual-test-caregiver-coordinator.md. Not in it: Socket.IO swap, JOIN enrollment, voice note
 - [x] (C) Photon SMS number + Voice profile connected to the ElevenLabs agent "FirstHour Caregiver Line" over SIP/TLS; inbound and outbound test calls passed on a real phone. Backend still has to place the call (#23 item 3)
 - [ ] (C) Rotate the Photon outbound SIP password (it appeared in a setup tool log) and update the ElevenLabs trunk
 

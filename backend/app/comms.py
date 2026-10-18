@@ -21,5 +21,6 @@ def format_alert(profile: dict, down_s: float, triage: TriageRecord, code: str) 
     if profile.get("on_blood_thinner"):
         lines.append("NOTE: on a blood thinner.")
     lines.append(f"Reply UNLOCK {code} to open the front door.")
-    lines.append(f"Or reply with a message and we'll read it to {profile.get('pronoun_object', 'them')}.")
+    lines.append("Reply ON MY WAY (or an ETA like \"10 min\") if you're going.")
+    lines.append(f"Ask a question, or send a message and we'll read it to {profile.get('pronoun_object', 'them')}.")
     return "\n".join(lines)

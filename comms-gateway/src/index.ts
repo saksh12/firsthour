@@ -3,9 +3,11 @@
 import { hasPhotonCreds, loadConfig } from "./config.js";
 import { PhotonGateway } from "./photon.js";
 import { createServer, startInboundPoller } from "./server.js";
+import { GatewayState } from "./state.js";
 
 const cfg = loadConfig();
-const gateway = new PhotonGateway(cfg);
+// Durable only on the live path; the stub keeps nothing on disk.
+const gateway = new PhotonGateway(cfg, new GatewayState(cfg.stubPhoton ? "" : cfg.stateFile));
 const server = createServer(cfg, gateway);
 
 server.listen(cfg.port, "127.0.0.1", () => {
@@ -28,7 +30,8 @@ server.listen(cfg.port, "127.0.0.1", () => {
       process.exitCode = 1;
     } else {
       startInboundPoller(cfg, gateway);
-      console.log("inbound poller started (polling Photon every 2s)");
+      const resume = gateway.state.since ? `resuming from ${gateway.state.since}` : "first run";
+      console.log(`inbound poller started (polling Photon every 2s, ${resume}, state ${cfg.stateFile})`);
     }
   }
 });

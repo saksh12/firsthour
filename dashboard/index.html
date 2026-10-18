@@ -199,6 +199,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     </div>
 
     <div class="panel">
+      <p class="label">Caregivers</p>
+      <ul class="attempts" id="responders"><li class="empty">No reply yet.</li></ul>
+      <div class="source" id="calls-note"></div>
+    </div>
+
+    <div class="panel">
       <p class="label">Unlock attempts</p>
       <ul class="attempts" id="attempts"><li class="empty">None yet.</li></ul>
     </div>
@@ -269,7 +275,8 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   let unlockFailed = false; // the Pi sent U but the latch never answered ACK,U
 
   function blank() {
-    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null };
+    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null,
+             responders: {}, delivery: "", calls: "" };
   }
 
   // --- rendering -----------------------------------------------------------
@@ -379,7 +386,32 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     }
   }
 
-  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); }
+  // Honest states only: "sent" = Photon's API accepted it. Delivered/read are never shown.
+  const RESPONDER_TEXT = { acknowledged: "replied", accepted: "on the way", arriving: "on the way", arrived: "at the door" };
+  function renderResponders() {
+    const ul = $("responders");
+    const rs = Object.values(view.responders);
+    if (!rs.length) {
+      const li = document.createElement("li"); li.className = "empty";
+      li.textContent = view.delivery || "No reply yet.";
+      ul.replaceChildren(li);
+    } else {
+      ul.replaceChildren(...rs.map((r) => {
+        const li = document.createElement("li");
+        const pill = document.createElement("span");
+        pill.className = "pill " + (r.status === "acknowledged" ? "no" : "ok");
+        pill.textContent = r.assigned ? "ASSIGNED" : r.status.toUpperCase();
+        const who = document.createElement("span"); who.className = "mono"; who.textContent = r.name || r.number || "caregiver";
+        const what = document.createElement("span");
+        what.textContent = RESPONDER_TEXT[r.status] + (r.eta_min != null && r.status !== "arrived" ? ` · ETA ${r.eta_min} min` : "");
+        li.append(pill, who, what);
+        return li;
+      }));
+    }
+    $("calls-note").textContent = view.calls;
+  }
+
+  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); renderResponders(); }
 
   function addAttempt(d) {
     const ul = $("attempts");
@@ -452,6 +484,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       view.answered = d.answered || [];
       view.triage = d.triage || null;
       view.asking = d.current_question || null;
+      for (const r of d.responders || []) view.responders[r.number] = r;
     }
     pi.setAvailable(!!d.pi_stt);
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
@@ -484,13 +517,29 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
         break;
       case "message_out":
-        log(d.delivered === false
-          ? "Alert NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". It goes out when they text the line."
-          : "Alert sent to " + (d.to || []).join(", "));
+        if (d.delivered === false) log("Text NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". An alert goes out when they text the line.");
+        else if (d.kind === "alert") log("Alert queued for " + (d.to || []).join(", "));
+        else log("Texted " + (d.to || []).join(", ") + " (" + d.kind.replace("_", " ") + "): “" + d.text + "”");
+        break;
+      case "delivery_status":
+        if (d.status === "acknowledged" || d.status === "responder_assigned") break;  // shown in Caregivers
+        if (d.kind === "alert") view.delivery = "Alert " + d.status + (d.stub ? " (stub)" : "") + ", waiting for a reply.";
+        log((d.kind || "text") + " " + d.status + " → " + (d.to || []).join(", ") + (d.status === "sent" ? " (Photon accepted)" : ""));
         break;
       case "message_in":
-        convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”", "read aloud as one calm sentence");
-        log("Caregiver " + d.sender + ": “" + d.text + "” (read aloud)");
+        if (d.sender && !view.responders[d.sender]) view.responders[d.sender] = { number: d.sender, status: "acknowledged" };
+        convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”",
+          d.question ? "question, answered by text" : d.spoken ? "read aloud as one calm sentence" : "read aloud from a fixed template");
+        log("Caregiver " + d.sender + ": “" + d.text + "”" + (d.question ? " (question, answered by text)" : d.spoken ? " (read aloud)" : ""));
+        break;
+      case "responder_update":
+        for (const k of Object.keys(view.responders)) if (d.assigned) view.responders[k].assigned = false;
+        view.responders[d.number] = d;
+        log((d.name || d.number) + ": " + RESPONDER_TEXT[d.status] + (d.eta_min != null ? " · ETA " + d.eta_min + " min" : "") + (d.via === "call" ? " (said on the call)" : ""));
+        break;
+      case "call_update":
+        view.calls = "Voice call " + d.status + (d.name ? " · " + d.name : "") + (d.reason ? " · " + d.reason : "") + (d.stub ? " (stub)" : "");
+        log(view.calls + (d.summary ? ": " + d.summary : ""));
         break;
       case "unlock_attempt":
         if (d.allowed) unlockFailed = false;

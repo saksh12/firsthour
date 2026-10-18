@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { Photon } from "@photon-ai/api";
 import type { Config } from "./config.js";
 import { buildSendBody, type Conversation, type ReceivedMessage } from "./messages.js";
+import { GatewayState } from "./state.js";
 
 export interface SendResult {
   id: string;
@@ -25,10 +26,11 @@ export class PhotonGateway {
   private client: Photon | null = null;
   readonly stubOutbox: Array<{ to: string; body: string }> = [];
   // A shared Photon line can't start a conversation (SHARED_LINE_INBOUND_REQUIRED), so
-  // we reply in the caregiver's last conversation with the agent line.
-  private readonly conversations = new Map<string, Conversation>();
-
-  constructor(private readonly cfg: Config) {}
+  // we reply in the caregiver's last conversation with the agent line. Kept on disk.
+  constructor(
+    private readonly cfg: Config,
+    readonly state: GatewayState = new GatewayState(""),
+  ) {}
 
   private photon(): Photon {
     this.client ??= new Photon({ headers: { Authorization: `Bearer ${this.cfg.photon.token}` } });
@@ -36,7 +38,7 @@ export class PhotonGateway {
   }
 
   remember(handle: string, conversation: Conversation): void {
-    this.conversations.set(handle, conversation);
+    this.state.remember(handle, conversation);
   }
 
   async send(to: string, body: string): Promise<SendResult> {
@@ -44,7 +46,7 @@ export class PhotonGateway {
       this.stubOutbox.push({ to, body });
       return { id: `stub-${this.stubOutbox.length}`, stubbed: true };
     }
-    const conv = this.conversations.get(to);
+    const conv = this.state.conversation(to);
     if (!conv) {
       // TODO(verify) at the Photon table: does a dedicated line let us text first?
       throw new NoConversationError(
