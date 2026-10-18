@@ -15,7 +15,7 @@ On the Pi:
     sudo ~/fh-venv/bin/python edge/sensor_node.py --usb   # QNX 8: no USB-serial driver, raw libusb
 
 With --uplink-socket this is only the safety process: HTTP and speech-to-text move to
-edge/uplink.py at a lower priority, started together by edge/supervisor.py (IMPLEMENTATION.md 6.9).
+edge/uplink.py at a lower priority, started together by edge/supervisor.py (IMPLEMENTATION.md 6.10).
 """
 
 import argparse

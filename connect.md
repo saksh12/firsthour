@@ -158,7 +158,9 @@ sudo -n sh -c 'WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin nohup
 Deploy `edge/link.py`, `edge/uplink.py` and `edge/supervisor.py` with the three
 files above. `sudo -n pidin` shows the safety process (and its USB helper) at
 priority 21, the uplink at 10 and `whisper-server` at 8; the log line
-`started <child> pid=` gives each PID.
+`started <child> pid=` gives each PID. Checked on the Pi on Oct 18, including
+`kill -9` of each child during a knock incident (IMPLEMENTATION.md 6.10).
+
 ## 5. Reset a demo incident
 
 From the **Mac repository root**, run:

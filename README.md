@@ -40,7 +40,7 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
 | `backend/` voice | Speak the fixed questions and caregiver replies | ✅ live | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends. Real stock voice played in three knock runs (`STUB_ELEVENLABS=0`) |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
-| `edge/` process split | `supervisor.py`: safety (QNX priority 21), uplink (10), whisper-server (8), restarted if they die | 🔶 | #22 step 1. Unit tests and a laptop run (`kill -9` of the uplink and of the safety process) pass; not yet run on the Pi |
+| `edge/` process split | `supervisor.py`: safety (QNX priority 21), uplink (10), whisper-server (8), restarted if they die | ✅ live | #22 step 1, PR #38. `pidin` on the Pi shows the priorities. `kill -9` of the uplink: back in 1.6-1.8 s, alarm untouched. `kill -9` of the safety process, idle and mid-incident: resumed the same incident and reclaimed the hub in 1.8-3.9 s. The single-process reader stays the default in `connect.md` |
 | `edge/` on the Pi | Same code on QNX 8 (Pi 5), BOX-3 over raw USB | ✅ live | Runs detached from SSH (`connect.md`). Raw USB lives in a restartable child process: a BOX-3 reset or USB abort keeps the incident, clock and alarm (verified with SIGKILL and physical RST). SIGTERM stops everything cleanly |
 | QNX AI module | `whisper.cpp` (oss.qnx.com apk, `ggml-base.en`) transcribes the person's answers on the Pi | ✅ live | `PI_STT=1`. Mic on the laptop (the Brio's USB mic fails in QNX `io-snd`); the Pi fetches each clip with a signed request, once. Resident `whisper-server` on loopback, below the reader's priority. Measured whisper 2.7-3.1 s per clip, upload to answer applied 3.8-4.3 s (model comparison in `edge/README.md`). The all-silent recording path is unit-tested only |
 | `arduino/hub/hub.ino` (BOX-3) | IMU, mic peak, screen, alarm, simulated latch | ✅ live | `TIME DOWN`, `LATCH OPEN`/`LATCH LOCKED` with automatic relock, pulsed speaker alarm. No ultrasonic sensor (`distCm` is `-1`) |
@@ -56,11 +56,10 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | Docs | `docs/sentry-story.md` started; demo script and Devpost draft in PR #31 | 🔶 | |
 | Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
 
-Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **390 passed** (Oct 18, #37).
+Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **463 passed** (Oct 18, #38).
 
 ### Still open
 
-- Process split of the Pi safety node into separate QNX processes (#22 step 1).
 - Real Photon text out and reply in; the backend placing the escalation call (#23, PR #36).
 - Non-fall checks and full calibration; unplugging Wi-Fi for M5; an all-silent Pi speech run.
 - Sentry uptime monitor on the tunnel; handoff sheet page; Paper or Base44.

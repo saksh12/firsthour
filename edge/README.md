@@ -62,7 +62,7 @@ and it stays well inside the 10 s timeout. Switch models by changing
 
 ### Split processes (QNX priorities)
 
-`edge/supervisor.py` runs the same code as separate processes (IMPLEMENTATION.md 6.9):
+`edge/supervisor.py` runs the same code as separate processes (IMPLEMENTATION.md 6.10):
 the safety process at priority 21 (sensors, incident, alarm, clock, signatures, command
 checks, latch), the uplink at 10 (HTTP, outbox delivery, clip fetch; signs nothing) and
 `whisper-server` at 8. They talk over a Unix socket in `edge/logs/`. The supervisor
@@ -78,6 +78,11 @@ sudo sh -c 'WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin /data/ho
 Kill demo: the supervisor logs each child's PID. `kill -9` the uplink, trigger a
 fall: the alarm and clock start with no network process alive, the uplink is back
 within seconds and the outbox replays. SIGTERM to the supervisor stops everything.
+
+On the Pi (Oct 18), a killed uplink was back at the backend in 1.6-1.8 s, and a
+killed safety process resumed its incident and reclaimed the hub in 1.8-3.9 s, with a
+knock incident open for one run of each (IMPLEMENTATION.md 6.10 has the details).
+
 ### Recover after a BOX reset
 
 QNX libusb can abort on physical BOX-3 RST. Live `--usb` isolates USB access in

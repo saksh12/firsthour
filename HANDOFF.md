@@ -7,8 +7,24 @@ steps, current test ports, signed reset and physical RST behavior.
 
 ## Where we are
 
-### Current: QNX AI module live (#22, Sun Oct 18)
+### Current: Pi safety node split into QNX processes (#22 step 1, Sun Oct 18)
 
+Branch `edge/qnx-process-split`, PR #38. `edge/supervisor.py` runs the safety
+process (QNX priority 21), the uplink (10, HTTP only, signs nothing) and
+`whisper-server` (8), and restarts any that die (`IMPLEMENTATION.md` 6.10).
+Launch it with the "Split mode" command in `connect.md`; the single-process
+reader is still the default.
+
+Checked on the Pi: `pidin` priorities, `kill -9` of the uplink and of the safety
+process both idle and during a knock incident. The restarted safety process kept
+the incident id and clock and re-sent the alarm when the hub reconnected; a
+signed `alarm_off` and `reset` were accepted afterwards. A transcript for a clip
+the killed process had dispatched is refused, so that answer counts as silence.
+
+Not checked live: CPU load on the uplink, unplugging Wi-Fi with the split
+running, an unlock through the split (the unlock path is unit-tested).
+
+### Current: QNX AI module live (#22, Sun Oct 18)
 Branch `edge/box3-voice`. The Pi now transcribes the person's spoken answers
 with `whisper.cpp` from oss.qnx.com (`IMPLEMENTATION.md` 6.8). The mic is on
 the Mac (AirPods; the Brio mic fails in QNX `io-snd`): the dashboard records
