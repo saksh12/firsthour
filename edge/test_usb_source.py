@@ -49,7 +49,8 @@ def test_claims_interfaces_when_driver_query_is_unsupported(usb, driver):
     assert dev.detach_kernel_driver.call_count == (2 if driver is True else 0)
     dev.ctrl_transfer.assert_called_once_with(0x21, 0x22, 1, 0)
     incoming.read.side_effect = [b"S,1,20,0,0,1,-1\nACK", TimeoutError(), b",L\nB\n"]
-    assert source.readline(0.05) == "S,1,20,0,0,1,-1"
+    assert source.readline(0) == "S,1,20,0,0,1,-1"
+    incoming.read.assert_called_once_with(64, timeout=1)
     assert source.readline(0.05) is None
     assert source.readline(0.05) == "ACK,L"
     assert source.readline(0.05) == "B"

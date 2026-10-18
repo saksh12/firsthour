@@ -1,0 +1,40 @@
+{
+  "purpose": "Stationary BOX-3, face-up, same-table simulated bottle-impact demo only",
+  "SOUND_THRESHOLD": 18602,
+  "ACCEL_THRESHOLD_G": 0.0499,
+  "FUSION_WINDOW_MS": 400,
+  "clean_drop_trials": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "excluded_trial": {
+    "trial": 6,
+    "reason": "Operator confirmed bottle knocked BOX-3 off table"
+  },
+  "method": "Midpoint between largest still-tail value and smallest drop peak on each axis; tails start 2000 ms after each acceleration peak",
+  "drop_replay_triggered": 19,
+  "still_tail_replay_triggered": 0,
+  "limitations": [
+    "Microphone clipped on all drops",
+    "Stationary tails are from the same recordings, not independent non-fall controls",
+    "Human-fall detection is not validated",
+    "No further loud physical test was run at the operator request"
+  ]
+}

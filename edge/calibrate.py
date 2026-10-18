@@ -7,6 +7,7 @@ Fusion from sensor_node.py so the numbers here mean the same thing as at runtime
 Record labeled trials (Enter starts each trial, q quits):
     python3 edge/sim_sensors.py | python3 edge/calibrate.py record --stdin --label clap
     python3 edge/calibrate.py record --serial /dev/<port> --label fall_beanbag
+    sudo ~/fh-venv/bin/python edge/calibrate.py record --usb --label demo_bottle_impact
 
 Standard labels: fall_beanbag, sit_mat, bottle_drop, door_slam, footsteps, clap.
 Labels starting with fall_ or sit_ count as falls; anything else counts as a non-fall.
@@ -33,6 +34,7 @@ from edge.sensor_node import (  # noqa: E402
     Fusion,
     SerialSource,
     StdinSource,
+    UsbCdcSource,
     parse_line,
 )
 
@@ -134,7 +136,8 @@ def _wait_for_start(keys, src):
             return False
         if keys is None:
             return True
-        ready, _, _ = select.select([keys], [], [], 0.15)
+        # Drain faster than the hub's 20 Hz stream while waiting for the operator.
+        ready, _, _ = select.select([keys], [], [], 0.01)
         if ready:
             line = keys.readline()
             if line == "" or line.strip().lower() == "q":
@@ -158,7 +161,10 @@ _AUTO = object()
 
 def record(args, src=_AUTO, keys=_AUTO):
     if src is _AUTO:
-        src = StdinSource() if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
+        if getattr(args, "usb", False):
+            src = UsbCdcSource()
+        else:
+            src = StdinSource() if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
     if keys is _AUTO:
         keys = _key_stream(args.stdin)
     headless = keys is None
@@ -373,6 +379,7 @@ def main():
     src.add_argument("--stdin", action="store_true",
                      help="read serial lines from stdin (sim_sensors.py)")
     src.add_argument("--serial", metavar="PORT", help="Arduino serial port")
+    src.add_argument("--usb", action="store_true", help="BOX-3 raw USB on QNX (run as root)")
     r.add_argument("--label", required=True,
                    help="trial label, e.g. " + ", ".join(
                        ("fall_beanbag", "sit_mat", "bottle_drop", "door_slam",

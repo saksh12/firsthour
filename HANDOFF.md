@@ -4,6 +4,42 @@ For the next coding agent. Read `AGENTS.md` first (rules and contracts), then th
 
 ## Where we are
 
+### Recording setup: bottle impact on a table
+
+Current branch: `edge/box3-calibration`, based on the display/alarm branch.
+The user plans to keep BOX-3 face-up on the same table as a bottle drop.
+Treat this as a labelled simulated impact, not human-fall validation. No person
+should fall for calibration or the demo, and the BOX-3 itself stays fixed.
+
+Recorded 20 trials, retaining 19 clean bottle drops with 2,500 samples in
+`edge/calibration/demo_bottle_drop_only.csv`. The fifth drop of the 19-drop
+batch, overall trial 6, knocked BOX-3 off the table according to the operator.
+It is preserved separately as `demo_bottle_box_fall.csv.excluded`. The first
+attempt included a pickup and is preserved as `demo_bottle_impact.csv.excluded`.
+Both exclusions are based on operator observations. All retained trials pass
+the sample-completeness check. The operator requested no further loud tests;
+do not ask for a replacement drop.
+
+Loaded provisional **same-table demo only** values into the Pi's private root
+`.env`: `SOUND_THRESHOLD=18602`, `ACCEL_THRESHOLD_G=0.0499`. The method and limits
+are in `edge/calibration/README.md` and `demo_table_settings.json`. Replay through
+the real fusion logic triggers all 19 recorded drops and none of their still
+tails. These tails are not independent negative trials. Microphone peaks clip
+on every drop. Separate non-fall checks and human-fall validation remain undone;
+the full calibration task stays open. Repository defaults are unchanged.
+
+The real QNX USB reader is restored against the isolated port-8001 backend.
+It accepted a signed reset, locking the latch, stopping the alarm and showing
+`READY`; live heartbeats are healthy. No physical drop was run after tuning.
+Issues #22 and #23 remain outside this hardware slice. PR #33, display/alarm,
+is open and this branch builds on it.
+
+Added raw-USB recording to `edge/calibrate.py`, drained samples faster while
+waiting for operator input, and clamped USB polling timeouts to at least 1 ms
+because libusb interprets 0 as an infinite wait. Verification:
+`backend/.venv/bin/python -m pytest -q backend/tests edge/test_usb_source.py edge/test_calibrate_usb.py`
+passed **335 tests**, with one existing Starlette deprecation warning.
+
 ### Current work: hardware only
 
 PR #32 is merged into `main`. The next branch is `edge/box3-display-alarm`.
@@ -25,8 +61,9 @@ closed its local incident, and reported latch locked/alarm off. Its persistent
 outbox is empty. This tests an unreachable backend; Wi-Fi itself was not disconnected.
 
 The user explicitly scoped current work to hardware. Leave pending issues #22
-and #23 alone. Next checks are screen orientation, audible volume, clean sensor
-streaming, visible automatic relock, and then local behavior with networking gone.
+and #23 alone. Screen, audible alarm, visible automatic relock and local behavior
+with the backend unreachable were verified above. Independent non-fall checks
+and the full calibration set remain pending.
 
 ### Update: Mac and QNX USB bring-up, Sat Oct 17, 10:48 PM PDT
 
