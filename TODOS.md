@@ -61,7 +61,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [x] (B · Droid) StepFun live on the port-8002 test backend (`edge/box3-voice`): rules win, the model only adds worrying answers, stale results carry forward. Measured 5-38 s on `low`; 45 s timeout, `max_tokens` 5000
 - [x] (A · Droid) Split the Pi safety node into separate QNX processes (#22 step 1), branch `edge/qnx-process-split`: `supervisor.py` runs safety (prio 21), uplink (10), whisper-server (8); Unix-socket link, uplink signs nothing, restarted safety resumes its incident. On the Pi: priorities in `pidin`, `kill -9` of each process idle and during a knock incident, signed `alarm_off` and `reset` accepted afterwards
 - [x] (C) Photon gateway: text out, reply in (90-minute cap, then simulator). Verified live Oct 18 with every stub off: alert delivered to a real phone, a real reply reached the backend 3.5 s after it was sent, the door-code text was delivered
-- [ ] (D) Sentry tracing spans + uptime monitor on tunneled `/health`
+- [ ] (D · Droid) Sentry tracing spans + uptime monitor on tunneled `/health`: spans done (`backend/sentry-products`: `unlock_to_latch` now ends at the Pi's `local_unlock` / `unlock_failed`, StepFun calls carry `gen_ai.*` attributes, dashboard Session Replay masked). Uptime monitor on the tunnel still needs a human (`docs/sentry-story.md` setup steps)
 - [x] (A · Codex) Local BOX-3 alarm + `TIME DOWN` with test backend paused; operator confirmed alarm, ticking clock, and locked latch; incident replayed on reconnect
 
 ## Phase 4: Hardening (10:30 PM to 1:30 AM)
@@ -75,7 +75,8 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (A) Improve fusion diagnostics: current logs/event sensors show the sample at detection, which can have low acceleration or sound when the other sensor crossed earlier within 400 ms. Log the matched peaks and timing to make calibration evidence clear.
 - [ ] (A) False-alarm check: __ of 20 non-falls triggered the voice check
 - [ ] (D) Dashboard polish, handoff sheet, phone view
-- [ ] (D) `docs/sentry-story.md` with one real finding
+- [x] (D · Droid) `docs/sentry-story.md` with one real finding: #3 slowest stage (StepFun) with the Oct 18 live numbers, #4 the unlock span that ended at the poll
+- [ ] (D) Sentry checks on the real project: a masked replay arrives, Insights → AI Agents shows the StepFun calls, and `unlock_to_latch` measured live (`TODO(measure)` in `docs/sentry-story.md`)
 - [x] (C) `scripts/demo_reset.sh` resets everything in one command (#25)
 - [ ] (All) Full demo 3 times in a row, no manual fixes
 

@@ -19,7 +19,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from typing import Callable, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, ContextManager, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -283,6 +284,53 @@ class StepFunError(Exception):
     pass
 
 
+# Span hook: (op, name=None, parent=None, **data) -> context manager yielding a span or None.
+# main.py passes Telemetry.span bound to the current incident; tests and stub mode trace nothing.
+SpanHook = Callable[..., ContextManager[Any]]
+GEN_AI_PROVIDER = "stepfun"
+
+
+@contextmanager
+def _no_span(op: str, **_kw):
+    yield None
+
+
+def _annotate(span: Any, **data: Any) -> None:
+    if span is not None:
+        for k, v in data.items():
+            if v is not None:
+                span.set_data(k, v)
+
+
+def gen_ai_response_attrs(data: Any) -> dict:
+    """Token usage and model from an OpenAI-compatible response, as Sentry AI Agents span
+    attributes (https://docs.sentry.io/platforms/python/tracing/instrumentation/custom-instrumentation/ai-agents-module/).
+    Counts only: the completion text never goes on a span."""
+    if not isinstance(data, dict):
+        return {}
+    out: dict = {}
+    if isinstance(data.get("model"), str):
+        out["gen_ai.response.model"] = data["model"]
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        for src, dst in (("prompt_tokens", "gen_ai.usage.input_tokens"),
+                         ("completion_tokens", "gen_ai.usage.output_tokens"),
+                         ("total_tokens", "gen_ai.usage.total_tokens")):
+            if isinstance(usage.get(src), int):
+                out[dst] = usage[src]
+        details = usage.get("completion_tokens_details")
+        # A subset of output_tokens, as Sentry expects; only if StepFun reports it.
+        if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
+            out["gen_ai.usage.output_tokens.reasoning"] = details["reasoning_tokens"]
+    try:
+        reason = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        reason = None
+    if isinstance(reason, str):
+        out["gen_ai.response.finish_reasons"] = json.dumps([reason])
+    return out
+
+
 def transcript_text(answers: list[tuple[str, str]]) -> str:
     return "\n".join(f"Q: {QUESTION_TEXT[k]}\nA: {a}" for k, a in answers)
 
@@ -298,7 +346,8 @@ def _strip_fences(text: str) -> str:
 class StepFun:
     def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
                  stub: bool = True, timeout_s: float = 10.0, triage_timeout_s: float = 45.0,
-                 answer_timeout_s: float = 12.0, transport: Transport = urllib_transport):
+                 answer_timeout_s: float = 12.0, transport: Transport = urllib_transport,
+                 span: SpanHook = _no_span):
         self.enabled = not stub and bool(api_key) and bool(base_url)
         if not stub and not self.enabled:
             log.warning("STUB_STEPFUN=0 but STEPFUN_API_KEY/STEPFUN_BASE_URL missing; using rules only")
@@ -312,13 +361,14 @@ class StepFun:
         self.timeout_s, self.triage_timeout_s = timeout_s, triage_timeout_s
         self.answer_timeout_s = answer_timeout_s
         self._transport = transport
+        self._span = span
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
         # Rewrite is spoken to the person, so it never queues behind 10 s triage calls.
         self._rewrite_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stepfun-rewrite")
 
     def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int, timeout_s: float,
-              pool: Optional[ThreadPoolExecutor] = None) -> str:
+              pool: Optional[ThreadPoolExecutor] = None, stage: Any = None) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -331,30 +381,44 @@ class StepFun:
         if json_mode:
             body["response_format"] = {"type": "json_object"}  # verified on our key, Oct 17
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        fut = (pool or self._pool).submit(self._transport, self.url, headers, body, timeout_s)
-        try:
-            data = fut.result(timeout=timeout_s)
-        except FutureTimeout:
-            raise StepFunError("timeout")
-        except urllib.error.HTTPError as e:
-            raise StepFunError(f"http {e.code}")
-        except (urllib.error.URLError, OSError) as e:
-            raise StepFunError(f"network: {e}")
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise StepFunError("unexpected response shape")
+        attrs = {"gen_ai.operation.name": "chat", "gen_ai.provider.name": GEN_AI_PROVIDER,
+                 # Older name for the provider; some Sentry views still read it.
+                 "gen_ai.system": GEN_AI_PROVIDER,
+                 "gen_ai.request.model": self.model, "gen_ai.request.max_tokens": max_tokens,
+                 "gen_ai.request.temperature": body["temperature"]}
+        with self._span("gen_ai.chat", name=f"chat {self.model}", parent=stage, **attrs) as g:
+            fut = (pool or self._pool).submit(self._transport, self.url, headers, body, timeout_s)
+            try:
+                data = fut.result(timeout=timeout_s)
+            except FutureTimeout:
+                if g is not None:
+                    g.set_status("deadline_exceeded")
+                raise StepFunError("timeout")
+            except urllib.error.HTTPError as e:
+                raise StepFunError(f"http {e.code}")
+            except (urllib.error.URLError, OSError) as e:
+                raise StepFunError(f"network: {e}")
+            _annotate(g, **gen_ai_response_attrs(data))
+            try:
+                return data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                raise StepFunError("unexpected response shape")
 
     def triage(self, answers: list[tuple[str, str]], profile: dict) -> TriageRecord:
+        with self._span("stepfun_triage") as stage:
+            return self._triage(answers, profile, stage)
+
+    def _triage(self, answers: list[tuple[str, str]], profile: dict, stage: Any) -> TriageRecord:
         rules = parse_rules(answers, profile)
         if not self.enabled or not answers:
+            _annotate(stage, result="rules", fallback_reason="model off" if not self.enabled else "no answers")
             return rules
         t0 = time.monotonic()
         try:
             # Reasoning counts against max_tokens. Measured Oct 18: unclear answers took up to
             # 3593 tokens; at 2000 the answer came back empty (finish_reason=length).
             content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=5000,
-                                 timeout_s=self.triage_timeout_s)
+                                 timeout_s=self.triage_timeout_s, stage=stage)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
@@ -366,21 +430,26 @@ class StepFun:
             except ValidationError as e:
                 raise StepFunError(f"invalid record ({e.error_count()} errors)")
         except StepFunError as e:
-            self._log("triage", t0, False, str(e))
+            self._log("triage", t0, False, str(e), stage)
             return rules
-        self._log("triage", t0, True, None)
+        self._log("triage", t0, True, None, stage)
         rec, kept = merge_model(rules, m)
         if kept:
             log.info("stepfun triage: rules kept for fields=%s", ",".join(kept))
+            _annotate(stage, rules_kept=",".join(kept))
         return rec
 
     def rewrite(self, text: str) -> str:
         if not self.enabled or not text.strip():
             return text
+        with self._span("stepfun_rewrite") as stage:
+            return self._rewrite(text, stage)
+
+    def _rewrite(self, text: str, stage: Any) -> str:
         t0 = time.monotonic()
         try:
             out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200,
-                             timeout_s=self.timeout_s, pool=self._rewrite_pool).strip().strip('"')
+                             timeout_s=self.timeout_s, pool=self._rewrite_pool, stage=stage).strip().strip('"')
             if not out:
                 raise StepFunError("empty")
             if len(out.split()) > MAX_REWRITE_WORDS:
@@ -389,9 +458,9 @@ class StepFun:
             if set(re.findall(r"\d+", out)) - set(re.findall(r"\d+", text)):
                 raise StepFunError("added numbers")
         except StepFunError as e:
-            self._log("rewrite", t0, False, str(e))
+            self._log("rewrite", t0, False, str(e), stage)
             return text
-        self._log("rewrite", t0, True, None)
+        self._log("rewrite", t0, True, None, stage)
         return out
 
     def answer(self, question: str, facts: dict) -> tuple[str, str]:
@@ -402,10 +471,15 @@ class StepFun:
         fallback = ("answer", status_answer(facts))
         if not self.enabled:
             return fallback
+        with self._span("stepfun_answer") as stage:
+            return self._answer(question, facts, fallback, stage)
+
+    def _answer(self, question: str, facts: dict, fallback: tuple[str, str], stage: Any) -> tuple[str, str]:
         t0 = time.monotonic()
         try:
             content = self._chat(QA_SYSTEM, json.dumps({"text": question, "facts": facts}), json_mode=True,
-                                 max_tokens=1200, timeout_s=self.answer_timeout_s, pool=self._rewrite_pool)
+                                 max_tokens=1200, timeout_s=self.answer_timeout_s, pool=self._rewrite_pool,
+                                 stage=stage)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
@@ -413,7 +487,7 @@ class StepFun:
             kind = raw.get("kind") if isinstance(raw, dict) else None
             text = str(raw.get("answer") or "").strip() if isinstance(raw, dict) else ""
             if kind == "message":
-                self._log("answer", t0, True, None)
+                self._log("answer", t0, True, None, stage)
                 return "message", ""
             if kind != "answer" or not text:
                 raise StepFunError("bad shape")
@@ -423,13 +497,14 @@ class StepFun:
             if set(re.findall(r"\d+", text)) - set(re.findall(r"\d+", json.dumps(facts) + question)):
                 raise StepFunError("added numbers")
         except StepFunError as e:
-            self._log("answer", t0, False, str(e))
+            self._log("answer", t0, False, str(e), stage)
             return fallback
-        self._log("answer", t0, True, None)
+        self._log("answer", t0, True, None, stage)
         return "answer", text
 
-    def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str]) -> None:
+    def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str], stage: Any = None) -> None:
         ms = int((time.monotonic() - t0) * 1000)
+        _annotate(stage, model_ms=ms, result="model" if ok else "fallback", fallback_reason=fallback_reason)
         if ok:
             log.info("stepfun call=%s model=%s ms=%d ok=True", call, self.model, ms)
         else:

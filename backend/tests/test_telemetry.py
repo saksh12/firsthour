@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 
 import pytest
 import sentry_sdk
@@ -10,7 +11,7 @@ from sentry_sdk.transport import Transport
 
 from app.main import create_app
 from app.telemetry import Telemetry
-from conftest import CAREGIVER, STRANGER, LaptopClient, signed_poll
+from conftest import CAREGIVER, SECRET, STRANGER, LaptopClient, signed_poll
 from test_api import TS, post_event, settings
 
 FAKE_DSN = "https://public@o0.ingest.example.invalid/1"
@@ -185,3 +186,119 @@ def test_tests_never_read_the_real_sentry_dsn_from_env():
     from app.main import load_settings
 
     assert load_settings()["SENTRY_DSN"] == ""
+
+
+# --- the unlock span ends at the latch report, not at the Pi's poll -------------------------
+
+def latch_report(c, type_):
+    """What the Pi posts after the latch answered (local_unlock) or didn't (unlock_failed)."""
+    from edge.security import sign_event
+
+    ts = TS + 5000
+    body = json.dumps({"device_id": "bath-01", "ts": ts, "type": type_, "sensors": {},
+                       "local_incident_id": f"bath-01-{TS}"}).encode()
+    r = c.post("/edge/event", content=body,
+               headers={"X-Signature": sign_event(SECRET, ts, body), "Content-Type": "application/json"})
+    assert r.status_code == 200
+
+
+def unlocked(cap, report=None):
+    c = app_with(cap)
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code_of(c)}"})
+    signed_poll(c)
+    if report:
+        latch_report(c, report)
+    c.post("/incident/resolve")
+    flush()
+    tx = next(t for t in cap.items("transaction") if t["transaction"] == "fall_incident")
+    return {s["op"]: s for s in tx["spans"]}
+
+
+def test_unlock_span_ends_when_the_pi_reports_the_latch_opened(cap):
+    spans = unlocked(cap, "local_unlock")
+    latch, pickup = spans["unlock_to_latch"], spans["command_to_pi"]
+    assert latch["data"]["outcome"] == "local_unlock" and latch["status"] == "ok"
+    assert pickup["data"]["picked_up"] is True
+    assert latch["timestamp"] >= pickup["timestamp"]  # picked up first, latch confirmed after
+
+
+def test_unlock_span_says_when_the_latch_never_answered(cap):
+    latch = unlocked(cap, "unlock_failed")["unlock_to_latch"]
+    assert latch["data"]["outcome"] == "unlock_failed" and latch["status"] == "deadline_exceeded"
+
+
+def test_unlock_span_without_a_pi_report_is_not_shown_as_done(cap):
+    latch = unlocked(cap)["unlock_to_latch"]
+    assert latch["status"] == "cancelled" and latch["data"]["ended_by"] == "incident RESOLVED"
+    assert "outcome" not in latch["data"]
+
+
+# --- StepFun calls show up in Sentry's AI Agents views, with counts and no text ---------------
+
+def test_stepfun_calls_are_gen_ai_spans_with_token_usage_and_no_text(cap):
+    record = {"conscious": True, "head_strike": None, "pain_location": None, "can_move": None,
+              "bleeding": None, "summary": "Needs help."}
+
+    def transport(url, headers, body, timeout):
+        triage = "JSON record" in body["messages"][0]["content"]
+        content = json.dumps(record) if triage else "Help is on the way."
+        return {"model": "step-5-preview", "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 210, "completion_tokens": 900, "total_tokens": 1110}}
+
+    c = app_with(cap, STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
+                 STEPFUN_TRANSPORT=transport)
+    post_event(c)
+    c.post("/person/answer", json={"text": "help me, my hip"})
+    for _ in range(200):
+        if c.get("/incident").json()["triage"]["summary"] == "Needs help.":
+            break
+        time.sleep(0.01)
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "hang tight grandma"})
+    c.post("/incident/resolve")
+    flush()
+    tx = next(t for t in cap.items("transaction") if t["transaction"] == "fall_incident")
+    by_id = {s["span_id"]: s for s in tx["spans"]}
+    # sentry-sdk 2.71 streams gen_ai.* spans as their own "span" items (stream_gen_ai_spans),
+    # still in the incident's trace and parented to the stage span.
+    chats = [s for batch in cap.items("span") for s in batch["items"]
+             if s["attributes"]["sentry.op"]["value"] == "gen_ai.chat"]
+    assert {by_id[s["parent_span_id"]]["op"] for s in chats} == {"stepfun_triage", "stepfun_rewrite"}
+    assert {s["trace_id"] for s in chats} == {tx["contexts"]["trace"]["trace_id"]}
+    for s in chats:
+        assert s["name"] == "chat step-5-preview"
+        d = {k: v["value"] for k, v in s["attributes"].items()}
+        assert d["gen_ai.operation.name"] == "chat" and d["gen_ai.provider.name"] == "stepfun"
+        assert d["gen_ai.request.model"] == "step-5-preview" and d["gen_ai.response.model"] == "step-5-preview"
+        assert (d["gen_ai.usage.input_tokens"], d["gen_ai.usage.output_tokens"]) == (210, 900)
+        assert d["gen_ai.usage.total_tokens"] == 1110
+        assert not any(k in d for k in ("gen_ai.input.messages", "gen_ai.output.messages"))
+    triage = next(s for s in tx["spans"] if s["op"] == "stepfun_triage")
+    assert triage["data"]["result"] == "model" and "model_ms" in triage["data"]
+    everything = cap.raw()
+    for private in ("my hip", "hang tight", "Help is on the way", "Needs help."):
+        assert private not in everything, private
+
+
+# --- browser config for the dashboard's Session Replay ---------------------------------------
+
+def test_public_config_gives_the_dsn_and_nothing_else(cap):
+    c = app_with(cap, STEPFUN_API_KEY="sk-secret", ELEVENLABS_API_KEY="el-secret")
+    r = c.get("/config/public", headers={"Origin": "http://localhost:5173"})
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    assert r.json() == {"sentry_dsn": FAKE_DSN, "environment": "hackathon"}
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "secret" not in r.text and SECRET not in r.text
+
+
+def test_public_config_without_a_dsn_turns_replay_off():
+    c = LaptopClient(create_app(settings()))
+    assert c.get("/config/public").json() == {"sentry_dsn": None, "environment": "hackathon"}
+
+
+def test_public_config_is_not_reachable_through_the_tunnel(cap):
+    c = app_with(cap)
+    for via in ({"X-Forwarded-For": "203.0.113.7"}, {"Cf-Connecting-IP": "203.0.113.7"}):
+        r = c.get("/config/public", headers=via)
+        assert r.status_code == 404 and FAKE_DSN not in r.text

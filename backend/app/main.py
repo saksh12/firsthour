@@ -29,7 +29,7 @@ from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
-from .telemetry import Telemetry
+from .telemetry import ENVIRONMENT, Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
 from .voice import ASSISTANT_LINE, DEFAULT_MODEL as DEFAULT_VOICE_MODEL, TTS_BASE_URL, Voice, line_ref
@@ -346,6 +346,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         cmd = make_command(secret, "unlock", incident_id)
         queues[inc.device_id].append(cmd)
         telemetry.start(incident_id, f"cmd:{cmd.id}", "command_to_pi", action="unlock")
+        # Ends when the Pi reports what the latch did, not when it picks the command up.
+        telemetry.start(incident_id, "latch", "unlock_to_latch", command_id=cmd.id)
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
 
@@ -396,6 +398,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         api_key=s.get("STEPFUN_API_KEY", ""), base_url=s.get("STEPFUN_BASE_URL", ""),
         model=s.get("STEPFUN_MODEL", "step-5-preview"), stub=s.get("STUB_STEPFUN", True),
         timeout_s=s.get("STEPFUN_REWRITE_TIMEOUT_S", 10.0), answer_timeout_s=s.get("STEPFUN_ANSWER_TIMEOUT_S", 12.0),
+        span=lambda op, **kw: telemetry.span(current_incident_id(), op, **kw),
         **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
@@ -429,7 +432,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                               playback_grace_s=PLAYBACK_GRACE_S,
                               emit=emit, on_close=on_close, speak=speak,
                               send_alert=send_alert,
-                              triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
+                              triage_fn=stepfun.triage,
                               rewrite_fn=stepfun.rewrite,
                               send_text=send_text, place_call=place_call, answer_fn=stepfun.answer,
                               call_order=parse_order(s["CAREGIVER_NUMBERS"]) or None, names=names,
@@ -489,6 +492,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         body = {"ok": alive, "edge": "live", "heartbeat_age_s": devices}
         return JSONResponse(body, status_code=200 if alive else 503, headers=no_cache)
 
+    @app.get("/config/public")
+    def config_public():
+        """Browser config for the dashboard, a static page that can't read .env. Only what is
+        safe to publish: a Sentry DSN only lets a client send events, so Sentry treats it as
+        public. Nothing else from the environment, ever. Not reachable through the tunnel."""
+        return JSONResponse({"sentry_dsn": s.get("SENTRY_DSN") or None, "environment": ENVIRONMENT},
+                            headers={"Cache-Control": "no-store"})
+
     @app.post("/edge/event")
     async def edge_event(request: Request):
         raw = await request.body()
@@ -521,7 +532,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             machine.cancel("cancelled on device")
         elif event.type == "speech_text" and event.speech:
             on_speech(event)
-        # local_unlock: the Pi opened the latch; we only log and show it.
+        elif event.type == "local_unlock":
+            # The Pi opened the latch (the Arduino answered ACK,U); we only log, show and time it.
+            telemetry.finish(event.local_incident_id or current_incident_id(), "latch", outcome="local_unlock")
+        elif event.type == "unlock_failed":
+            telemetry.finish(event.local_incident_id or current_incident_id(), "latch",
+                             status="deadline_exceeded", outcome="unlock_failed")
         inc = machine.incident
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 

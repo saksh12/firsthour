@@ -206,7 +206,7 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 | Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
 
-One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `speech_to_text` → `stepfun_triage` → `photon_send` → `unlock_decision` → `command_to_pi`. The demo-close screenshot is this trace with the **real** end-to-end number.
+One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `speech_to_text` → `stepfun_triage` → `photon_send` → `unlock_decision` → `command_to_pi` (queued → picked up by the Pi) → `unlock_to_latch` (grant → the Pi's `local_unlock` or `unlock_failed`). Caregiver replies add `stepfun_rewrite` / `stepfun_answer`; each StepFun HTTP call is a `gen_ai.chat` child with `gen_ai.*` model and token attributes, never prompt or completion text. The demo-close screenshot is this trace with the **real** end-to-end number.
 
 ## StepFun usage (`backend/app/triage.py`)
 
