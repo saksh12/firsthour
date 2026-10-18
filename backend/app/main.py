@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .calls import VoiceCalls, companion_token, parse_postcall, verify_postcall_signature
 from .coordinator import parse_names, parse_order
 from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
-from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage, StepFunCall
+from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage, StepFunCall, TriageCorrection
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
 from .telemetry import ENVIRONMENT, Telemetry
@@ -773,6 +773,13 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     @app.post("/incident/resolve", dependencies=[Depends(laptop_only)])
     def resolve():
         return {"resolved": machine.resolve("operator"), **machine.snapshot()}
+
+    @app.post("/triage/correct", dependencies=[Depends(laptop_only)])
+    def triage_correct(body: TriageCorrection):
+        """The operator fixes a field the rules or the model misread. Wins over both."""
+        if not machine.correct(body.field, body.value, by="operator"):
+            raise HTTPException(status_code=409, detail="no open incident")
+        return machine.snapshot()
 
     @app.post("/demo/reset")
     def demo_reset(request: Request):

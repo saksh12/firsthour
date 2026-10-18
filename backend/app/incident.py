@@ -19,14 +19,14 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .comms import format_alert
 from .coordinator import (Commitment, claimer_reply, incident_facts, is_question, parse_commitment,
                           spoken_line, stand_by_text, status_answer)
 from .models import IncidentState as S
 from .models import StepFunTriageView, TriageRecord
-from .triage import QUESTIONS, TriageOutcome, carry_forward, is_clear_fine, parse_rules
+from .triage import QUESTIONS, TriageOutcome, apply_corrections, carry_forward, is_clear_fine, parse_rules
 from .unlock import UnlockGuard, is_unlock_attempt
 from .voice import ASSISTANT_LINE
 
@@ -66,6 +66,7 @@ class Incident:
     script_done: bool = False
     companion_ready: bool = False
     relays: int = 0
+    corrections: dict[str, Any] = field(default_factory=dict)  # field -> value set by the operator
 
 
 def _noop(*_args) -> None:
@@ -255,7 +256,7 @@ class IncidentMachine:
             # takes 5-38 s, so the running one picks up whatever arrived meanwhile.
             start, inc.refining = not inc.refining, True
             # Escalate on the instant rule-based record: the alert never waits on StepFun.
-            inc.triage = parse_rules(answers, self.profile)
+            inc.triage = apply_corrections(parse_rules(answers, self.profile), inc.corrections)
             self._emit_triage(inc)
             if inc.state == S.CHECKING:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
@@ -299,12 +300,14 @@ class IncidentMachine:
                     if len(inc.answers) != len(answers):
                         # Stale, and with live speech nearly every call is: keep what it learned,
                         # then run once more on the latest answers.
-                        carried = carry_forward(triage, parse_rules(list(inc.answers), self.profile))
+                        carried = apply_corrections(
+                            carry_forward(triage, parse_rules(list(inc.answers), self.profile)), inc.corrections)
                         if carried != inc.triage or shown:
                             inc.triage = carried
                             self._emit_triage(inc)
                         continue
                     inc.refining = False
+                    triage = apply_corrections(triage, inc.corrections)  # read under the lock
                     if triage != inc.triage or shown:
                         inc.triage = triage
                         self._emit_triage(inc)
@@ -410,6 +413,21 @@ class IncidentMachine:
             if not self.incident:
                 return False
             self._finish(S.RESOLVED, f"resolved by {by}")
+            return True
+
+    def correct(self, field_name: str, value: Any, by: str = "operator") -> bool:
+        """The operator fixes a misread field. It wins over the rules and the model for the rest
+        of this incident, including later refinements. False with no open incident."""
+        if field_name not in TRIAGE_FIELDS:
+            raise ValueError(f"not a correctable field: {field_name}")
+        with self._lock:
+            inc = self.incident
+            if not inc:
+                return False
+            inc.corrections[field_name] = value
+            inc.triage = apply_corrections(inc.triage, inc.corrections)
+            log.info("triage corrected field=%s value=%r by=%s incident_id=%s", field_name, value, by, inc.id)
+            self._emit_triage(inc)
             return True
 
     def cancel(self, reason: str) -> None:
@@ -554,7 +572,9 @@ class IncidentMachine:
         used = inc.triage
         r = inc.model_result
         record = r.model_record if r else None
-        added = [f for f in TRIAGE_FIELDS if getattr(used, f) != getattr(rules, f)]
+        # A corrected field came from the operator, not the model.
+        added = [f for f in TRIAGE_FIELDS
+                 if f not in inc.corrections and getattr(used, f) != getattr(rules, f)]
         # A record with a changed field gets a templated summary, so "summary" means the model wrote it.
         if record and used.summary == record.get("summary") and used.summary != rules.summary:
             added.append("summary")
@@ -573,7 +593,7 @@ class IncidentMachine:
             overruled=[f for f in TRIAGE_FIELDS
                        if record and record.get(f) is not None and record.get(f) != getattr(used, f)],
         )
-        return {"rules": rules.model_dump(), "model": view.model_dump()}
+        return {"rules": rules.model_dump(), "model": view.model_dump(), "corrections": dict(inc.corrections)}
 
     def _responders(self, inc: Incident) -> list[dict]:
         return [{"number": n, **r, "assigned": n == inc.claimed_by} for n, r in inc.responders.items()]

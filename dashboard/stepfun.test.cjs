@@ -102,3 +102,38 @@ test("caregiver message notes name the rewrite or its fallback", () => {
                "question, answered by text (step-5-preview, 7.4 s)");
   assert.equal(sf.messageNote({ text: "on my way", spoken: null }, null), "read aloud from a fixed template");
 });
+
+test("a corrected field is marked, never credited to the model, and an operator unknown reads Unknown", () => {
+  const rules = { conscious: true, head_strike: true, pain_location: null, can_move: null, bleeding: null, on_blood_thinner: true };
+  const used = { ...rules, head_strike: false, bleeding: null };
+  const model = { status: "ok", name: "step-5-preview", record: { conscious: true, head_strike: true, pain_location: null,
+                  can_move: null, bleeding: true, summary: "x" }, added: ["bleeding"], overruled: ["head_strike", "bleeding"] };
+  const by = Object.fromEntries(sf.rows(used, rules, model, ["ok", "head", "pain", "move", "bleeding"],
+                                        { head_strike: false, bleeding: null }).map((r) => [r.label, r]));
+  assert.equal(by["Hit head"].corrected, true);
+  assert.deepEqual([...by["Hit head"].used], ["No", "v-no"]);
+  assert.equal(by["Bleeding"].corrected, true);
+  assert.equal(by["Bleeding"].added, false);
+  assert.deepEqual([...by["Bleeding"].used], ["Unknown", "v-unk"]);
+  assert.equal(by["Can move legs"].corrected, false);
+  assert.deepEqual([...by["Can move legs"].used], ["Unclear", "v-unk"]);
+});
+
+test("only the five spoken fields can be corrected", () => {
+  const rows = sf.rows({ conscious: true, on_blood_thinner: true }, null, null, ["ok"]);
+  assert.deepEqual([...rows.map((r) => r.field)], ["conscious", "head_strike", "pain_location", "can_move", "bleeding", null]);
+  assert.ok(rows.every((r) => r.corrected === false));
+});
+
+test("a yes/no click cycles Yes, No, Unknown", () => {
+  assert.equal(sf.nextValue(true), false);
+  assert.equal(sf.nextValue(false), null);
+  assert.equal(sf.nextValue(null), true);
+  assert.equal(sf.nextValue(undefined), true);
+});
+
+test("a corrected record says its summary is templated (corrected)", () => {
+  const m = { name: "step-5-preview", added: ["summary"], record: {} };
+  assert.equal(sf.summarySource(m, { bleeding: false }), "Summary templated (corrected): the operator set a field above.");
+  assert.equal(sf.summarySource(m, {}), "Summary written by step-5-preview.");
+});
