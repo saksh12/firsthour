@@ -59,26 +59,43 @@ export function createServer(cfg: Config, gateway: PhotonGateway) {
 }
 
 /**
- * Background inbound poller (real path only). Polls Photon for received
- * iMessages and forwards caregiver replies to the backend. Returns a stop fn.
+ * One poll of Photon for received iMessages, forwarding caregiver replies to the
+ * backend. A message is marked seen, and `since` moves past it, only once its forward
+ * succeeds: if the backend is down for a tick, the reply is retried on the next one.
+ * Messages come oldest first, so the tick stops at the first failure and nothing
+ * after it is skipped.
  */
-export function startInboundPoller(cfg: Config, gateway: PhotonGateway, intervalMs = 2000): () => void {
-  let stopped = false;
+export function createInboundPoll(
+  cfg: Config,
+  gateway: Pick<PhotonGateway, "listReceivedSince" | "remember">,
+  forward: (cfg: Config, payload: InboundForward) => Promise<unknown> = forwardInbound,
+): () => Promise<void> {
+  // In memory: a gateway restart still drops replies in the gap. A durable cursor is the Photon issue.
   let since = new Date(Date.now() - 5000).toISOString();
   const seen = new Set<string>();
+
+  return async () => {
+    for (const m of await gateway.listReceivedSince(since)) {
+      if (seen.has(m.id)) continue;
+      if (isCaregiverReply(m, cfg.photon.agentHandle)) {
+        gateway.remember(m.sentBy.handle, conversationOf(m));
+        await forward(cfg, toBackendInbound(m));
+      }
+      seen.add(m.id);
+      if (m.createdAt > since) since = m.createdAt;
+    }
+  };
+}
+
+/** Background inbound poller (real path only). Returns a stop fn. */
+export function startInboundPoller(cfg: Config, gateway: PhotonGateway, intervalMs = 2000): () => void {
+  let stopped = false;
+  const poll = createInboundPoll(cfg, gateway);
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
-      for (const m of await gateway.listReceivedSince(since)) {
-        if (seen.has(m.id)) continue;
-        seen.add(m.id);
-        if (isCaregiverReply(m, cfg.photon.agentHandle)) {
-          gateway.remember(m.sentBy.handle, conversationOf(m));
-          await forwardInbound(cfg, toBackendInbound(m));
-        }
-        if (m.createdAt > since) since = m.createdAt;
-      }
+      await poll();
     } catch (err) {
       console.error("[poller]", err instanceof Error ? err.message : err);
     } finally {

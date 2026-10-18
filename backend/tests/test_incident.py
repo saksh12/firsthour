@@ -1,6 +1,7 @@
 """State machine (IMPLEMENTATION.md section 6.4)."""
 
 import re
+import time
 
 import pytest
 
@@ -293,3 +294,55 @@ def test_answer_returns_before_the_model_finishes(clock, rec):
     m.on_answer("help, my hip hurts")  # returns while the model is still "thinking"
     assert m.state == S.ALERTING and m.snapshot()["triage"]["pain_location"] == "hip"
     gate.set()
+
+
+def test_quick_answers_share_one_refinement_then_one_rerun(clock, rec):
+    """Issue #21.7: 3 answers during one slow StepFun call -> exactly 2 calls, and the
+    second sees all 3 answers."""
+    import threading
+
+    from app.models import TriageRecord
+
+    gate, calls, done = threading.Event(), [], threading.Event()
+
+    def slow_triage(answers, profile):
+        calls.append(len(answers))
+        if len(calls) == 1:
+            gate.wait(5)
+        else:
+            done.set()
+        return TriageRecord(conscious=True, summary=f"model saw {len(answers)} answers")
+
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    m = IncidentMachine(guard, DEMO_PROFILE, clock=clock, emit=rec.emit, speak=rec.spoken.append,
+                        triage_fn=slow_triage)
+    m.on_fall("bath-01", "inc-1")
+    for a in ("help", "no", "my hip"):
+        m.on_answer(a)
+    gate.set()
+    assert done.wait(5)
+    for _ in range(100):
+        if m.snapshot()["triage"]["summary"] == "model saw 3 answers":
+            break
+        time.sleep(0.01)
+    assert calls == [1, 3]
+    assert m.snapshot()["triage"]["summary"] == "model saw 3 answers"
+    assert not m.incident.refining
+
+
+def test_failed_refinement_does_not_block_the_next_one(clock, rec):
+    calls = []
+
+    def flaky(answers, profile):
+        calls.append(len(answers))
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return parse_rules(answers, profile)
+
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    m = IncidentMachine(guard, DEMO_PROFILE, clock=clock, emit=rec.emit, speak=rec.spoken.append,
+                        triage_fn=flaky, background=lambda fn: fn())
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("help")
+    m.on_answer("no")
+    assert calls == [1, 2]

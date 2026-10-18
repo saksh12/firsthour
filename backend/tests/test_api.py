@@ -2,12 +2,12 @@
 
 import json
 import re
+import time
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import create_app
-from conftest import CAREGIVER, SECRET, STRANGER
+from conftest import CAREGIVER, SECRET, STRANGER, LaptopClient, signed_poll
 from edge.security import CommandVerifier, sign_event
 
 TS = 1_760_000_000_000
@@ -21,8 +21,8 @@ def settings(**overrides) -> dict:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app(settings()))
+def client() -> LaptopClient:
+    return LaptopClient(create_app(settings()))
 
 
 def post_event(client, type_="fall_suspected", secret=SECRET, ts=TS):
@@ -41,7 +41,7 @@ def test_health_ok_in_stub_mode(client):
 
 
 def test_health_503_without_heartbeat_when_edge_is_live():
-    c = TestClient(create_app(settings(STUB_EDGE=False)))
+    c = LaptopClient(create_app(settings(STUB_EDGE=False)))
     assert c.get("/health").status_code == 503
     post_event(c, "heartbeat")
     assert c.get("/health").status_code == 200
@@ -78,20 +78,20 @@ def test_full_unlock_path_and_stranger_refused(client):
 
     stranger = client.post("/comms/inbound", json={"sender": STRANGER, "text": f"UNLOCK {code}"}).json()
     assert stranger == {"type": "unlock_attempt", "allowed": False, "reason": "not enrolled"}
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
     ok = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()
     assert ok["allowed"] is True
     assert client.get("/incident").json()["state"] == "UNLOCKED"
 
-    cmds = client.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
+    cmds = signed_poll(client).json()["commands"]
     assert [c["action"] for c in cmds] == ["unlock"]
     # The Pi independently accepts it, and only once.
     pi = CommandVerifier(SECRET)
     assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (True, "ok")
     assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (False, "replay")
     # Commands are handed out once.
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
 
 def test_im_fine_cancels_and_no_alert_is_sent(client):
@@ -136,7 +136,7 @@ def test_caregiver_message_is_read_aloud(client):
     assert r == {"type": "message", "accepted": True}
     assert client.app.state.spoken[-1] == "I'm 2 minutes away"
     assert client.get("/incident").json()["state"] == "RESPONDING"
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
 
 def test_incident_snapshot_and_events_never_contain_the_code(client, monkeypatch):
@@ -151,12 +151,12 @@ def test_incident_snapshot_and_events_never_contain_the_code(client, monkeypatch
 
 
 def test_stub_outbox_is_gone_when_photon_is_real():
-    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False)))
     assert c.get("/comms/stub/outbox").status_code == 404
 
 
 def test_real_photon_inbound_only_trusts_the_gateway():
-    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False)))
     msg = {"sender": CAREGIVER, "text": "on my way"}
     assert c.post("/comms/inbound", json=msg).status_code == 401
     assert c.post("/comms/inbound", json=msg, headers={"Authorization": "Bearer nope"}).status_code == 401
@@ -175,7 +175,7 @@ def test_real_photon_alert_goes_to_the_gateway(monkeypatch):
         return {"id": "msg_1", "stubbed": False}
 
     monkeypatch.setattr("app.main.urllib_transport", fake_transport)
-    c = TestClient(create_app(settings(STUB_PHOTON=False, COMMS_GATEWAY_URL="http://gw:8787/")))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False, COMMS_GATEWAY_URL="http://gw:8787/")))
     post_event(c)
     c.post("/person/answer", json={"text": "help"})
     assert done.wait(2)
@@ -193,3 +193,104 @@ def test_help_button_escalates(client):
 def test_missing_secret_refuses_to_start():
     with pytest.raises(RuntimeError):
         create_app(settings(SHARED_SECRET=""))
+
+
+def test_unsigned_or_replayed_poll_is_refused_and_leaves_the_unlock_queued(client):
+    code = escalate(client)
+    assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["allowed"]
+    # Someone else on the Wi-Fi polls first: no signature, then a forged one.
+    r = client.get("/edge/commands", params={"device_id": "bath-01"})
+    assert r.status_code == 401
+    ts = int(time.time() * 1000)
+    r = client.get("/edge/commands", params={"device_id": "bath-01", "ts": ts}, headers={"X-Signature": "00" * 32})
+    assert r.status_code == 401
+    # The Pi's signed poll still gets the unlock.
+    r = signed_poll(client)
+    assert [c["action"] for c in r.json()["commands"]] == ["unlock"]
+    # Replaying that exact poll is refused.
+    replay = client.get(str(r.request.url), headers={"X-Signature": r.request.headers["X-Signature"]})
+    assert replay.status_code == 401 and replay.json()["detail"] == "replay"
+
+
+def reset(client, token=SECRET):
+    return client.post("/demo/reset", headers={"Authorization": f"Bearer {token}"})
+
+
+def test_demo_reset_needs_the_token(client):
+    escalate(client)
+    assert client.post("/demo/reset").status_code == 401
+    assert reset(client, token="wrong").status_code == 401
+    assert client.get("/incident").json()["state"] == "ALERTING"
+    assert signed_poll(client).json() == {"commands": []}
+
+
+def test_three_demo_runs_with_reset_between_all_end_clean(client):
+    pi = CommandVerifier(SECRET)
+    for run in range(3):
+        ts = int(time.time() * 1000) + run
+        assert post_event(client, ts=ts).status_code == 200
+        client.post("/person/answer", json={"text": "help"})
+        code = re.search(r"UNLOCK (\d{4})", client.get("/comms/stub/outbox").json()["messages"][-1]["text"]).group(1)
+        assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["allowed"]
+        local = f"bath-01-{ts}"
+        unlock = signed_poll(client).json()["commands"]
+        assert [c["action"] for c in unlock] == ["unlock"] and pi.check(unlock[0], local) == (True, "ok")
+
+        r = reset(client).json()
+        assert r["state"] == "IDLE" and r["devices"] == ["bath-01"]
+        assert client.app.state.guard.active_incident_id is None
+        cmds = signed_poll(client).json()["commands"]
+        # alarm_off closes the Pi's incident first, so the reset that follows is obeyed.
+        assert [c["action"] for c in cmds] == ["alarm_off", "reset"]
+        assert pi.check(cmds[0], local) == (True, "ok")
+        assert pi.check(cmds[1], None) == (True, "ok")
+        assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["reason"] == "no active incident"
+
+
+def test_unlock_failed_from_the_pi_reaches_the_dashboard(client):
+    escalate(client)
+    assert post_event(client, "unlock_failed").status_code == 200
+    ev = list(client.app.state.events)[-1]
+    assert ev.type == "device_status" and ev.data == {"device_id": "bath-01", "event": "unlock_failed"}
+
+
+# --- who may press the buttons ------------------------------------------------------
+
+def lan_client(**overrides):
+    from fastapi.testclient import TestClient
+
+    return TestClient(create_app(settings(**overrides)), client=("192.168.1.50", 50000))
+
+
+def test_operator_actions_refused_from_another_device_on_the_wifi():
+    lan = lan_client()
+    app = lan.app
+    laptop = LaptopClient(app)
+    escalate(laptop)
+    assert lan.post("/incident/resolve").status_code == 403
+    assert lan.post("/person/answer", json={"text": "I'm fine"}).status_code == 403
+    assert lan.get("/comms/stub/outbox").status_code == 403  # the alert carries the code
+    assert lan.post("/comms/inbound", json={"sender": CAREGIVER, "text": "UNLOCK 0000"}).status_code == 403
+    assert laptop.get("/incident").json()["state"] == "ALERTING"
+    # Watching still works, and so does the Pi.
+    assert lan.get("/incident").status_code == 200
+    assert signed_poll(lan).status_code == 200
+    assert post_event(lan, "heartbeat").status_code == 200
+
+
+def test_tunnel_reaches_health_only(client):
+    via = {"X-Forwarded-For": "203.0.113.7", "Cf-Connecting-IP": "203.0.113.7"}
+    assert client.get("/health", headers=via).status_code == 200
+    for method, path in [("POST", "/incident/resolve"), ("GET", "/comms/stub/outbox"), ("GET", "/incident"),
+                         ("POST", "/demo/reset"), ("GET", "/edge/commands")]:
+        assert client.request(method, path, headers=via).status_code == 404, path
+    # Each proxy header on its own is enough.
+    assert client.post("/incident/resolve", headers={"X-Forwarded-For": "203.0.113.7"}).status_code == 404
+
+
+def test_dashboard_socket_refused_through_the_tunnel(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/dashboard", headers={"X-Forwarded-For": "203.0.113.7"}) as ws:
+            ws.receive_json()

@@ -25,6 +25,17 @@ def test_1_correct_number_code_and_open_incident_unlocks(guard, granted):
     assert granted == ["inc-1"]
 
 
+def test_1c_code_is_one_time(guard, granted, caplog):
+    code = guard.open_incident("inc-1")
+    assert guard.try_unlock(CAREGIVER, f"UNLOCK {code}").allowed
+    with caplog.at_level(logging.INFO, logger="firsthour.unlock"):
+        again = guard.try_unlock(CAREGIVER, f"UNLOCK {code}")
+    assert not again.allowed and again.reason == "code already used"
+    assert granted == ["inc-1"]
+    assert guard.audit[-1].reason == "code already used"
+    assert "reason=code already used" in caplog.text
+
+
 def test_1b_grammar_is_case_and_whitespace_tolerant(guard):
     code = guard.open_incident("inc-1")
     assert guard.try_unlock(CAREGIVER, f"  unlock   {code} \n").allowed

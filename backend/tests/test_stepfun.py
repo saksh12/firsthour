@@ -6,12 +6,11 @@ import time
 import urllib.error
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.profile import DEMO_PROFILE
 from app.triage import QUESTIONS, StepFun, parse_rules
-from conftest import CAREGIVER
+from conftest import CAREGIVER, LaptopClient
 from test_api import post_event, settings
 
 ANSWERS = [("ok", "Help, I slipped"), ("head", "no"), ("pain", "my right hip")]
@@ -203,7 +202,7 @@ def test_app_uses_stepfun_for_triage_and_reply():
         content = json.dumps(GOOD) if "JSON record" in system else "Help is on the way."
         return {"choices": [{"message": {"content": content}}]}
 
-    c = TestClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
+    c = LaptopClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
                                        STEPFUN_TRANSPORT=transport)))
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help"}).json()
@@ -222,7 +221,7 @@ def test_app_uses_stepfun_for_triage_and_reply():
 
 
 def test_app_default_is_rules_only():
-    c = TestClient(create_app(settings()))
+    c = LaptopClient(create_app(settings()))
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help, I can't move"}).json()
     assert snap["triage"]["can_move"] is False

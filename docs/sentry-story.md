@@ -16,7 +16,7 @@ what you changed. Only write numbers you measured.
 
 1. Create the Sentry project and put the DSN in `.env` as `SENTRY_DSN=…` (never commit it).
 2. Start the backend. The log should say `sentry enabled`.
-3. Expose `/health`: `cloudflared tunnel --url http://localhost:8000` (or ngrok).
+3. Expose `/health`: `cloudflared tunnel --url http://localhost:8000` (or ngrok). The tunnel publishes the whole port, so the backend answers 404 to every tunneled request except `/health` (it spots the `X-Forwarded-For` / `Cf-Connecting-IP` headers).
 4. In Sentry, create an Uptime monitor on `https://<tunnel>/health`.
 5. Run `python3 scripts/simulate_fall.py`, then open Traces → `fall_incident`.
 
