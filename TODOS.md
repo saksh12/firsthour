@@ -12,7 +12,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [x] (C) Photon table: outbound calls? sender number on inbound? credentials (Q3). Calls run on an **SMS number** (not iMessage); inbound carries `sentBy.handle`; keys work
 - [x] (C) ElevenLabs key works with one TTS call; cloning / STT on our tier? (Q5): free tier, no cloning, stock voice
 - [x] (D) Sentry project + DSN; read the challenge text
-- [ ] (D) Pick Paper or Base44 (Q8)
+- [x] (D) Pick Paper or Base44 (Q8): skipped (decided Sun); neither is entered
 
 **Done when:** `/health` OK, one StepFun and one ElevenLabs call work, Q2/Q3/Q4/Q7 answered.
 
@@ -60,7 +60,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (B) Rules don't read hedged amounts like "a little, not very much" (moving); StepFun may fill it, but only when its reply lands before the incident ends
 - [x] (B · Droid) StepFun live on the port-8002 test backend (`edge/box3-voice`): rules win, the model only adds worrying answers, stale results carry forward. Measured 5-38 s on `low`; 45 s timeout, `max_tokens` 5000
 - [x] (A · Droid) Split the Pi safety node into separate QNX processes (#22 step 1), branch `edge/qnx-process-split`: `supervisor.py` runs safety (prio 21), uplink (10), whisper-server (8); Unix-socket link, uplink signs nothing, restarted safety resumes its incident. On the Pi: priorities in `pidin`, `kill -9` of each process idle and during a knock incident, signed `alarm_off` and `reset` accepted afterwards
-- [ ] (C) Photon gateway: text out, reply in (90-minute cap, then simulator)
+- [x] (C) Photon gateway: text out, reply in (90-minute cap, then simulator). Verified live Oct 18 with every stub off: alert delivered to a real phone, a real reply reached the backend 3.5 s after it was sent, the door-code text was delivered
 - [ ] (D · Droid) Sentry tracing spans + uptime monitor on tunneled `/health`: spans done (`backend/sentry-products`: `unlock_to_latch` now ends at the Pi's `local_unlock` / `unlock_failed`, StepFun calls carry `gen_ai.*` attributes, dashboard Session Replay masked). Uptime monitor on the tunnel still needs a human (`docs/sentry-story.md` setup steps)
 - [x] (A · Codex) Local BOX-3 alarm + `TIME DOWN` with test backend paused; operator confirmed alarm, ticking clock, and locked latch; incident replayed on reconnect
 
@@ -88,6 +88,13 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] Backup video recorded
 - [ ] Devpost submitted by 11:00 AM, screenshot saved
 - [ ] Sponsor-specific forms (Q10)
+- [x] (D · Droid) Devpost draft, demo script, Espressif write-up and prize-admin checklist (`docs/devpost-draft.md`, `docs/demo-script.md`, `docs/espressif.md`, `docs/prize-admin.md`)
+- [ ] (D · Droid) Prize admin (human-only steps, owners in `docs/prize-admin.md`): ask an organizer whether Applied Intelligence combines with Beyond the Digital
+- [ ] (D · Droid) Prize admin: register the GoDaddy domain and link it
+- [ ] (D · Droid) Prize admin: enter the Espressif "Best Use of Espressif" prize on Devpost
+- [ ] (D · Droid) Prize admin: create the Sentry Uptime monitor on the tunnel's `/health`
+- [ ] (D · Droid) Prize admin: select every prize we enter on Devpost (not Devin, Paper or Base44)
+- [ ] (D · Droid) Prize admin: confirm prize rules on live.lahacks.com/tracks
 
 ## Found in the PR review (#13)
 
@@ -124,7 +131,8 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 - [x] (B · Claude) pytest never reports to the real Sentry project (#29): local runs were filing issues and emails
 - [ ] (C, Devin for Manya) #23 caregiver coordinator: durable inbound cursor, multi-caregiver claim/ETA, Q&A, honest delivery states, ElevenLabs escalation call + signed post-call webhook. Tick after the Mac + Pi + BOX-3 check in docs/manual-test-caregiver-coordinator.md. Not in it: Socket.IO swap, JOIN enrollment, voice note
-- [x] (C) Photon SMS number + Voice profile connected to the ElevenLabs agent "FirstHour Caregiver Line" over SIP/TLS; inbound and outbound test calls passed on a real phone. Backend still has to place the call (#23 item 3)
+- [x] (C) Photon SMS number + Voice profile connected to the ElevenLabs agent "FirstHour Caregiver Line" over SIP/TLS; inbound and outbound test calls passed on a real phone. Backend placed real calls Oct 18 04:24 and 04:58 (#23 item 3)
+- [x] (C · Droid) Call result survives a dead tunnel: the 04:58 call's post-call webhook came back as HTTP 500 from the quick tunnel (retries were off) and the ETA said on the call was lost. The backend now polls `GET /v1/convai/conversations/{id}` for calls it placed until the webhook or the poll records it once; `scripts/voice_tunnel_setup.py` repoints the webhook and the `get_incident` tool at a fresh tunnel and turns retries on. Still to run: one live call through the new code (user skipped it this morning)
 - [ ] (C) Rotate the Photon outbound SIP password (it appeared in a setup tool log) and update the ElevenLabs trunk
 
 - [ ] (C/D) Speech Auto-listen starts on a backend "question played" event instead of a fixed 3 s delay: the mic can hear the laptop say "…say I'm fine…", and `is_clear_fine("say I'm fine")` is True, so it could cancel an incident
@@ -141,7 +149,7 @@ Stack with every stub off (`STUB_*=0`, real Sentry) on spare ports; the Pi-side 
 - [x] (B · Droid) StepFun rewrite/Q&A deadlines raised to 10 s / 12 s (`STEPFUN_*_TIMEOUT_S`): step-5-preview reasoned 6-12 s on every call Sunday morning, so both always fell back
 - [ ] (B) Only one incident at a time across devices: a second device's fall is ignored while another device's incident is open, and that node then alarms with no backend incident. Fine for the one-box demo; note it in the pitch
 - [ ] (A) `edge/link.py` drops a message already received when the peer closes the socket; delivery stays at-least-once (the backend dedupes), but the uplink could hand over cleanly
-- [ ] (C) Photon filters inbound texts that look like one-time codes (`listFilteredVerificationCodes`): a real `UNLOCK 1234` reply from a phone is still to be tried through the live line
+- [x] (C) Photon filters inbound texts that look like one-time codes (`listFilteredVerificationCodes`): a real `UNLOCK 1234` reply from a phone is still to be tried through the live line. **Oct 18:** a real `UNLOCK 4101` from the phone was not filtered by Photon; the backend refused it correctly because the 600 s unlock window had passed
 
 ## Proposed
 

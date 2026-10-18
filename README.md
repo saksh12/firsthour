@@ -25,7 +25,7 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | --- | --- | --- | --- |
 | M1 The thud | Clock starts, sensors spike | ✅ live on the BOX-3 | `TIME DOWN mm:ss` on the BOX-3 screen and an audible alarm, verified by the operator. Thresholds are **provisional**, from 19 bottle drops on one table (`edge/calibration/`); non-fall checks and the full calibration set are still to do |
 | M2 The voice | "Are you okay?" spoken, triage follows | ✅ live | Real ElevenLabs stock voice plays every fixed line. The person answers out loud: AirPods on the laptop record each answer, and the Pi transcribes it with `whisper.cpp` (QNX AI module, `PI_STT=1`). Live runs on the real Pi passed the help path and the "I'm fine" cancel. The silence timer starts after the question finishes playing. Typed box stays as the fallback |
-| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test. The caregiver coordinator (#23) is in PR #36 |
+| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · ✅ real Photon | Live Oct 18: alert delivered, a real reply reached the backend 3.5 s after the phone sent it, the door-code text followed 0.3 s later. Each caregiver gets their own shared Photon line, so they text the agent line once first (PR #39) |
 | M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ live on the BOX-3 | On the real Pi: a stranger with the right code was refused, the caregiver was accepted, the Pi verified the signed command, the BOX-3 answered `ACK,U`, showed `LATCH OPEN` and relocked by itself. Run with the simulator page, not real Photon |
 | M5 Offline | Wi-Fi off: alarm and clock keep going | ✅ live (backend paused) | With the backend paused, the BOX-3 kept the alarm and clock going and the latch locked; the incident replayed on reconnect. Wi-Fi itself has not been unplugged yet |
 
@@ -45,7 +45,7 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | QNX AI module | `whisper.cpp` (oss.qnx.com apk, `ggml-base.en`) transcribes the person's answers on the Pi | ✅ live | `PI_STT=1`. Mic on the laptop (the Brio's USB mic fails in QNX `io-snd`); the Pi fetches each clip with a signed request, once. Resident `whisper-server` on loopback, below the reader's priority. Measured whisper 2.7-3.1 s per clip, upload to answer applied 3.8-4.3 s (model comparison in `edge/README.md`). The all-silent recording path is unit-tested only |
 | `arduino/hub/hub.ino` (BOX-3) | IMU, mic peak, screen, alarm, simulated latch | ✅ live | `TIME DOWN`, `LATCH OPEN`/`LATCH LOCKED` with automatic relock, pulsed speaker alarm. No ultrasonic sensor (`distCm` is `-1`) |
 | `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first (a blocked alert is resent on their first text). Gateway replies are HMAC-signed with replay protection (#14). Coordinator work in PR #36 |
-| Phone calls | Photon SMS number → ElevenLabs agent over SIP | 🔶 | Test calls in and out passed; the backend doesn't place the escalation call yet (#23) |
+| Phone calls | Photon SMS number → ElevenLabs agent over SIP | ✅ live | The backend placed two real escalation calls Oct 18 (04:24, 04:58); the agent collected an ETA and refused to unlock. The post-call webhook carried the first one back into the thread; the second was lost to a flapping tunnel, so the backend now also polls ElevenLabs for the finished call. `scripts/voice_tunnel_setup.py` repoints the webhook and tool at a fresh tunnel |
 | `dashboard/` | Live incident page: state, clock, triage + transcript, conversation, unlock log | ✅ live | Door shows the Pi's confirmation. Conversation panel shows each spoken line and what the Pi heard |
 | Speech input | The person answers out loud | ✅ live (Pi) · 🔶 Chrome | With `PI_STT=1` the dashboard records after each question (8 s cap, stops early on quiet) and the Pi transcribes. Without it, Chrome Web Speech push-to-talk remains, checked only with a stubbed recognizer; keep its Auto-listen off (it can hear the laptop say "…I'm fine…") |
 | Caregiver simulator | Stand-in phone for the demo | ✅ | `dashboard/caregiver-simulator.html` |
@@ -53,16 +53,16 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | `scripts/demo_reset.sh` | One-command reset between runs | ✅ live | Backend to IDLE + signed `reset` to the Pi (latch locked, alarm off, `READY`) |
 | Calibration | Thresholds from ~20 trials per action | 🔶 Provisional | 19 bottle drops recorded on the BOX-3 (`edge/calibrate.py`); demo values live only in the Pi's `.env`. Non-fall trials and repo defaults still to do |
 | Handoff sheet page | Paramedic summary | ⬜ | |
-| Docs | `docs/sentry-story.md` started; demo script and Devpost draft in PR #31 | 🔶 | |
-| Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
+| Docs | `docs/devpost-draft.md`, `docs/demo-script.md`, `docs/espressif.md`, `docs/prize-admin.md`, `docs/sentry-story.md` | 🔶 | Human-only prize steps are in `docs/prize-admin.md` |
+| Paper or Base44 | Pick one sponsor for the dashboard | Skipped | Decided Sun: neither is entered |
 
 Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **488 passed** (Oct 18, `backend/sentry-products`).
 
 ### Still open
 
-- Real Photon text out and reply in; the backend placing the escalation call (#23, PR #36).
+- A full live voice round trip in one go (call, ETA on the call, code text, `UNLOCK`) on the demo laptop with the Pi attached.
 - Non-fall checks and full calibration; unplugging Wi-Fi for M5; an all-silent Pi speech run.
-- Sentry uptime monitor on the tunnel; handoff sheet page; Paper or Base44.
+- Sentry uptime monitor on the tunnel; handoff sheet page; the prize admin steps in `docs/prize-admin.md`.
 - Rotate `PHOTON_SIP_OUTBOUND_PASSWORD`.
 
 ### Decided
