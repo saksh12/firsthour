@@ -2,7 +2,58 @@
 
 For the next coding agent. Read `AGENTS.md` first (rules and contracts), then this file. `TODOS.md` and `README.md` were up to date as of PR #30. Everything below is newer.
 
+Use [connect.md](connect.md) for the consolidated Mac, QNX Pi and BOX-3 connection
+steps, current test ports, signed reset and physical RST behavior.
+
 ## Where we are
+
+### Current: recover after BOX RST and keep the reader independent of SSH
+
+Branch `edge/box3-usb-recovery`. PRs #33 and #34 are merged into main.
+The operator reported an unexpected alarm, then no alarm after physical BOX-3
+RST and another drop. Logs show sensor agreement at 07:05:11 UTC, sound 32768
+and acceleration change about 0.07 g. The reader was later absent and its SSH
+session ended with status 255. There is no captured USB exception from that
+first exit, so the exact exit cause is unproven. A later 07:16:10 event while
+networking was unavailable was preserved in the outbox. These events do not
+establish whether the table impacts were bottle drops or other disturbances.
+
+Restored the reader, then lost access while the hotspot was unavailable.
+After the operator restored both devices to the hotspot, copied the tested
+USB recovery code to the Pi and launched the reader with QNX `nohup`, stdin
+disconnected and stderr appended to `edge/logs/reader-stderr.log`. It now
+survives the launching SSH connection exiting. At 07:26 UTC the backend had a
+fresh real-Pi heartbeat. Authenticated demo reset returned the backend to IDLE.
+
+The final implementation isolates raw USB in a child process because physical
+RST aborts the QNX libusb process before Python can catch an exception. The
+parent alone owns the incident, clock, nonce cache, networking and unlock checks.
+It restarts a failed USB helper after one second and restores locked/alarm/display
+state only after that helper claims the hub. It never buffers or retries an
+unlock. A pending unlock without confirmation fails; a late ACK is ignored.
+Access and busy errors still fail visibly. Other reader exceptions now enter
+the local audit log. Sensitivity is unchanged. Physical RST is not a demo reset;
+use the signed reset described in `edge/README.md`.
+
+Local verification: **347 passed**, one existing Starlette deprecation warning,
+using `backend/.venv/bin/python -m pytest -q backend/tests edge/test_usb_source.py edge/test_usb_recovery.py edge/test_calibrate_usb.py`.
+The initial exception-only recovery failed the quiet RST check. A detached shell
+captured exit status 134, leading to process isolation. The final version passed
+two real QNX checks at 07:34 UTC: killing only the helper with SIGKILL, then an
+operator physical RST. The helper exited with -9 and -6 respectively, and USB
+was reclaimed about 1.4 s later in each log. Parent PID 20893738 survived both;
+current helper PID 21205012. Fresh real-Pi heartbeat, backend IDLE, latch locked.
+During a later incident, `bath-qnx-usb-test-1792309007817`, the operator pressed
+RST several times and confirmed the alarm and timer resumed. Logs keep that
+same incident through helper aborts and restarts with the same parent PID.
+Signed alarm-off/reset at 07:38:12 UTC then closed it and restored READY. This
+also verifies open-incident recovery on the real hardware. No additional drops
+were requested. The exact cause of that later sensor trigger remains unlabelled.
+
+`connect.md` now consolidates local network/SSH access, USB ownership, deployed
+paths, start/stop commands, firmware work and reset behavior. Links resolve and
+shell examples pass `bash -n`. Cloud agents need a local-network route and an
+authorized SSH key; a GitHub fork alone does not provide hardware access.
 
 ### Recording setup: bottle impact on a table
 

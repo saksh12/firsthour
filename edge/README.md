@@ -1,5 +1,8 @@
 # edge/
 
+Use [connect.md](../connect.md) for the complete Mac, Pi 5 and BOX-3 connection,
+deployment and demo reset procedure.
+
 The Pi-side safety node (IMPLEMENTATION.md sections 6.1–6.3, 9.3, 10).
 `sensor_node.py` reads the hub's sensor lines, runs
 two-sensor fusion, owns the local incident, and posts signed events to the backend.
@@ -21,9 +24,26 @@ QNX image; libusb crashed when tested as an ordinary user. The transport
 handles QNX's unsupported kernel-driver query and still requires interface
 claims to succeed. See the [libusb driver-query reference](https://libusb.sourceforge.io/api-1.0/group__libusb__dev.html#ga1cabd4660a274f715eeb82de112e0779).
 
-Verified on the real BOX-3 and QNX Pi: sensor samples and acknowledgements for
-`L`, `A1`, `A0`, and `U`. The firmware still needs LCD and audible alarm output.
-The fall thresholds remain uncalibrated.
+Verified on the real BOX-3 and QNX Pi: sensors, LCD, audible alarm, latch status,
+automatic relock and signed commands. Provisional same-table bottle-demo
+thresholds are loaded on the Pi; full calibration remains pending. See
+`calibration/README.md` for the measurements and limits.
+
+### Recover after a BOX reset
+
+QNX libusb can abort on physical BOX-3 RST. Live `--usb` isolates USB access in
+a restartable child; the parent keeps its incident, clock and security state.
+Reconnect locks the latch and restores the alarm/display for an open incident.
+A pending unlock fails instead of being replayed. Access and busy errors still
+fail visibly. Real helper termination and physical RST recovered with the same
+parent PID; the operator also verified alarm/timer continuity during an incident.
+
+Use [connect.md](../connect.md) to start the reader independently of SSH and to
+run the signed demo reset. Physical RST does not resolve an incident. No sensor
+readings or hub outputs are available while the hub is disconnected.
+
+USB recovery uses the documented [PyUSB error codes](https://github.com/pyusb/pyusb/blob/v1.3.1/usb/core.py)
+and [libusb error values](https://libusb.sourceforge.io/api-1.0/group__libusb__misc.html).
 
 ## Calibration (IMPLEMENTATION.md 10.2)
 
