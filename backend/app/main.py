@@ -115,6 +115,7 @@ def load_settings() -> dict:
         "VOICE_TOOL_TOKEN": os.getenv("VOICE_TOOL_TOKEN", ""),
         "ELEVENLABS_COMPANION_AGENT_ID": os.getenv("ELEVENLABS_COMPANION_AGENT_ID", ""),
         "VOICE_CALL_AFTER_SECONDS": float(os.getenv("VOICE_CALL_AFTER_SECONDS", "20")),
+        "CALL_RESULT_POLL_S": float(os.getenv("CALL_RESULT_POLL_SECONDS", "10")),
         "PI_STT": os.getenv("PI_STT", "0") == "1",
         "PI_STT_HOLD_S": float(os.getenv("PI_STT_HOLD_SECONDS", "20")),
     }
@@ -246,6 +247,55 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     # conversation_id -> (incident_id, number) for calls we placed: only those may record a
     # commitment from the post-call webhook.
     placed_calls: dict[str, tuple[str, str]] = {}
+    recorded_calls: set[str] = set()  # results already carried into the incident, by webhook or poll
+    calls_lock = threading.Lock()
+    CALL_RESULT_MAX_S = 15 * 60
+
+    def record_call(call: dict, source: str) -> dict:
+        """Carry a finished call into the incident once, whichever of the webhook or the poll
+        brings its result first."""
+        with calls_lock:
+            if call["conversation_id"] in recorded_calls:
+                return {"accepted": False, "reason": "already recorded"}
+            incident_id, number = placed_calls.get(call["conversation_id"], (call["incident_id"], None))
+            result = machine.record_call_result(incident_id, number, call["user_turns"], call["summary"])
+            if result.get("accepted"):
+                recorded_calls.add(call["conversation_id"])
+        log.info("post-call result source=%s incident_id=%s placed_by_us=%s accepted=%s",
+                 source, incident_id, number is not None, result.get("accepted"))
+        return result
+
+    def poll_call_result(conversation_id: str, incident_id: str, sleep=time.sleep) -> Optional[dict]:
+        """The webhook needs a public tunnel in front of /voice/postcall. When that is down (it was,
+        for a real call Oct 18 05:00) the caregiver's ETA from the call would be lost, so ask
+        ElevenLabs for the finished call directly until the webhook has recorded it, the incident
+        is over, or the call is done."""
+        deadline = time.time() + CALL_RESULT_MAX_S
+        while time.time() < deadline:
+            sleep(s.get("CALL_RESULT_POLL_S", 10))
+            if conversation_id in recorded_calls:
+                return None
+            inc = machine.incident
+            if not inc or inc.id != incident_id:
+                return None
+            try:
+                call = calls.result(conversation_id)
+            except Exception as e:  # a network blip: ask again next round
+                log.warning("call result poll failed conversation_id=%s error=%s",
+                            conversation_id, type(e).__name__)
+                continue
+            if call is None:
+                continue
+            if call["status"] != "done":
+                with calls_lock:
+                    recorded_calls.add(conversation_id)
+                number = placed_calls.get(conversation_id, ("", ""))[1]
+                log.warning("voice call ended as %s incident_id=%s", call["status"], incident_id)
+                emit("call_update", {"incident_id": incident_id, "status": "failed", "name": names.get(number)})
+                return None
+            return record_call(call, source="poll")
+        log.warning("call result never arrived conversation_id=%s incident_id=%s", conversation_id, incident_id)
+        return None
 
     def place_call(incident_id: str, number: str, variables: dict) -> None:
         def run() -> None:
@@ -255,6 +305,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 placed_calls[r["conversation_id"]] = (incident_id, number)
                 emit("call_update", {"incident_id": incident_id, "status": "placed", "stub": r["stubbed"],
                                      "name": names.get(number)})
+                if calls.real:
+                    threading.Thread(target=poll_call_result, args=(r["conversation_id"], incident_id),
+                                     daemon=True).start()
             except Exception as e:  # a failed call must never touch the incident flow
                 detail = ""
                 if isinstance(e, urllib.error.HTTPError):
@@ -366,7 +419,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         stub=s.get("STUB_ELEVENLABS", True), api_key=s.get("ELEVENLABS_API_KEY", ""),
         agent_id=s.get("ELEVENLABS_AGENT_ID", ""), phone_number_id=s.get("ELEVENLABS_PHONE_NUMBER_ID", ""),
         base_url=s.get("ELEVENLABS_BASE_URL", ""),
-        **({"transport": s["CALLS_TRANSPORT"]} if "CALLS_TRANSPORT" in s else {}),  # tests only
+        **({k: s[v] for k, v in (("transport", "CALLS_TRANSPORT"), ("fetch", "CALLS_FETCH")) if v in s}),  # tests only
     )
     log.info("voice calls: %s", "ElevenLabs over SIP" if calls.real else "stub (logged only)")
     companion_enabled = bool(not s.get("STUB_ELEVENLABS", True)
@@ -421,6 +474,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
     app.state.inbound_replays = inbound_replays
     app.state.calls, app.state.placed_calls = calls, placed_calls
+    app.state.poll_call_result = poll_call_result  # tests run the poller inline
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
@@ -638,11 +692,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="malformed webhook")
         if call is None:
             return {"ok": True, "ignored": True}
-        incident_id, number = placed_calls.get(call["conversation_id"], (call["incident_id"], None))
-        result = machine.record_call_result(incident_id, number, call["user_turns"], call["summary"])
-        log.info("post-call webhook incident_id=%s placed_by_us=%s accepted=%s",
-                 incident_id, number is not None, result.get("accepted"))
-        return {"ok": True, **result}
+        return {"ok": True, **record_call(call, source="webhook")}
 
     @app.get("/voice/incident")
     def voice_incident(request: Request):
