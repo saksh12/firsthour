@@ -8,12 +8,11 @@ A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Ard
 
 ## Status
 
-Last updated Sat Oct 17, 5:15 PM.
+Last updated Sat Oct 17, 5:25 PM.
 
 | Status | Meaning |
 | --- | --- |
 | ✅ | Done and on `main` |
-| 🟡 | Written, in review on branch `backend/review-13-fixes` (not merged yet) |
 | 🔶 | Code exists, never run with real keys or hardware |
 | ⬜ | Not started |
 
@@ -23,47 +22,48 @@ Last updated Sat Oct 17, 5:15 PM.
 | --- | --- | --- | --- |
 | M1 The thud | Clock starts, sensors spike | 🔶 Works with the fake Arduino | Arduino sketch, real sensors, calibration |
 | M2 The voice | "Are you okay?" spoken, triage follows | ⬜ | No audio plays yet (ElevenLabs), no speech input (typed box only) |
-| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🟡 real Photon | Photon keys, live test |
-| M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ Unlock rules and signing · 🟡 door shows the Pi's confirmation | Arduino sketch (simulated latch, no servo) |
+| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test |
+| M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ Unlock rules, signing, door shows the Pi's confirmation | Arduino sketch (simulated latch, no servo) |
 | M5 Offline | Wi-Fi off: alarm and clock keep going | 🔶 Covered by tests | Real hardware run |
 
 ### By part
 
 | Part | What it does | Status | Notes |
 | --- | --- | --- | --- |
-| `backend/` state machine | `IDLE → CHECKING → ALERTING → RESPONDING → UNLOCKED → RESOLVED` | ✅ | 🟡 race fix when StepFun is slow |
+| `backend/` state machine | `IDLE → CHECKING → ALERTING → RESPONDING → UNLOCKED → RESOLVED` | ✅ | Escalation never waits on StepFun |
 | `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ | Full test suite |
-| `backend/` triage | Rule-based answers → triage record | ✅ | 🟡 fix: never invents a "no" the person didn't say |
-| `backend/` StepFun | `step-5-preview` triage + reply rewrite, 3 s timeout, rule fallback | 🔶 | Needs `STEPFUN_API_KEY` |
-| `backend/` Sentry | One trace per incident, logs, uptime `/health` | 🔶 | Needs `SENTRY_DSN`, then an uptime monitor on a tunnel |
-| `backend/` voice | Speak the fixed questions and caregiver replies | ⬜ | Only logs the text today |
-| `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | 🟡 fix: obeys only its own incident |
+| `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say |
+| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Measured 5-7 s per call, so the 3 s timeout always falls back; timeout decision pending |
+| `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
+| `backend/` voice | Speak the fixed questions and caregiver replies | ⬜ | ElevenLabs key and stock voice work; nothing plays audio yet |
+| `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
 | `edge/` on the Pi | Same code on QNX over USB serial | ⬜ | Gate 1 at 7:00 PM: QNX or Linux |
 | `arduino/hub.ino` | Sensors, simulated latch (LED), buzzer, display | ⬜ | Need accelerometer chip and display type |
-| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🟡 live path | Needs Photon keys; caregiver texts the line once first |
-| `dashboard/` | Live incident page: state, clock, triage + transcript, unlock log | ✅ | 🟡 door shows Pi confirmation |
-| Caregiver simulator | Stand-in phone for the demo | 🟡 | Ported from #3 |
+| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first |
+| `dashboard/` | Live incident page: state, clock, triage + transcript, unlock log | ✅ | Door shows the Pi's confirmation |
+| Caregiver simulator | Stand-in phone for the demo | ✅ | `dashboard/caregiver-simulator.html` |
 | `scripts/simulate_fall.py` | Whole story end to end on stubs | ✅ | Passes |
 | `scripts/demo_reset.sh` | One-command reset between runs | ⬜ | |
-| Calibration | Thresholds from ~20 trials per action | ⬜ | Placeholder numbers in `edge/config.py` |
+| Calibration | Thresholds from ~20 trials per action | ⬜ | Tool in review (#15); placeholder numbers in `edge/config.py` |
 | Handoff sheet page | Paramedic summary | ⬜ | |
 | Docs | `docs/sentry-story.md` started; demo script, Devpost draft | 🔶 / ⬜ | |
 | Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
 
 ### Decided
 
-- **No NFC reader and no servo** at the event. NFC is dropped. The latch is simulated: the Pi verifies the signed command and tells the Arduino to open; the Mac shows the door only after the Pi confirms. (🟡 in review)
+- **No NFC reader and no servo** at the event. NFC is dropped. The latch is simulated: the Pi verifies the signed command and tells the Arduino to open; the Mac shows the door only after the Pi confirms.
 
-### Keys to add to `.env`
+### Keys in `.env` (checked with real calls)
 
-| Key | For | Status |
-| --- | --- | --- |
-| `SHARED_SECRET` | Pi ↔ backend signing (same value on both) | ⬜ generate: `python3 -c 'import secrets;print(secrets.token_hex(32))'` |
-| `STEPFUN_API_KEY`, `STEPFUN_BASE_URL` | Triage (base URL must match the key's region) | ⬜ |
-| `PHOTON_TOKEN`, `PHOTON_PROJECT_ID`, `PHOTON_AGENT_HANDLE` | Caregiver texts | ⬜ |
-| `SENTRY_DSN` | Tracing, logs, uptime | ⬜ |
-| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Voice (no code uses it yet) | ⬜ |
-| `CAREGIVER_NUMBERS` | A teammate's phone, with consent | ⬜ |
+| Key | Status |
+| --- | --- |
+| `SHARED_SECRET` | ✅ Generated (same value goes on the Pi) |
+| `SENTRY_DSN` | ✅ Traces and logs arrive |
+| `STEPFUN_API_KEY`, `STEPFUN_BASE_URL` | ✅ Key is on the `.ai` host |
+| `PHOTON_TOKEN`, `PHOTON_PROJECT_ID`, `PHOTON_AGENT_HANDLE` | ✅ Read-only call works |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | ✅ Free tier (no cloning); stock voice "Sarah" |
+| `CAREGIVER_NUMBERS` | ✅ Real phone; it must text the agent line once |
+| `SERIAL_PORT` | ⬜ When the Arduino arrives |
 
 ## Run it locally (no hardware)
 
