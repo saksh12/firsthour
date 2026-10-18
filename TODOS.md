@@ -62,6 +62,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (B) All 14 security cases pass
 - [ ] (A) Offline test + reconnect replay
 - [ ] (A) Calibration done, thresholds committed in `edge/config.py`
+- [x] (A · Codex) Record face-up BOX-3 bottle impacts on the same table: 19 clean trials, box-fall trial excluded; provisional Pi-only demo sensitivity selected from replay (`edge/box3-calibration`). Independent non-fall checks and human-fall validation remain pending.
 - [ ] (A) False-alarm check: __ of 20 non-falls triggered the voice check
 - [ ] (D) Dashboard polish, handoff sheet, phone view
 - [ ] (D) `docs/sentry-story.md` with one real finding

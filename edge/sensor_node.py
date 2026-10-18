@@ -513,7 +513,8 @@ class UsbCdcSource:
     def readline(self, timeout):
         while b"\n" not in self._buf:
             try:
-                self._buf += bytes(self._in.read(self._in.wMaxPacketSize, timeout=int(timeout * 1000)))
+                # libusb treats zero as an infinite wait; calibration also polls with timeout=0.
+                self._buf += bytes(self._in.read(self._in.wMaxPacketSize, timeout=max(1, int(timeout * 1000))))
             except self._usb.core.USBTimeoutError:
                 return None
         line, self._buf = self._buf.split(b"\n", 1)
