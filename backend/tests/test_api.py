@@ -211,3 +211,45 @@ def test_unsigned_or_replayed_poll_is_refused_and_leaves_the_unlock_queued(clien
     # Replaying that exact poll is refused.
     replay = client.get(str(r.request.url), headers={"X-Signature": r.request.headers["X-Signature"]})
     assert replay.status_code == 401 and replay.json()["detail"] == "replay"
+
+
+def reset(client, token=SECRET):
+    return client.post("/demo/reset", headers={"Authorization": f"Bearer {token}"})
+
+
+def test_demo_reset_needs_the_token(client):
+    escalate(client)
+    assert client.post("/demo/reset").status_code == 401
+    assert reset(client, token="wrong").status_code == 401
+    assert client.get("/incident").json()["state"] == "ALERTING"
+    assert signed_poll(client).json() == {"commands": []}
+
+
+def test_three_demo_runs_with_reset_between_all_end_clean(client):
+    pi = CommandVerifier(SECRET)
+    for run in range(3):
+        ts = int(time.time() * 1000) + run
+        assert post_event(client, ts=ts).status_code == 200
+        client.post("/person/answer", json={"text": "help"})
+        code = re.search(r"UNLOCK (\d{4})", client.get("/comms/stub/outbox").json()["messages"][-1]["text"]).group(1)
+        assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["allowed"]
+        local = f"bath-01-{ts}"
+        unlock = signed_poll(client).json()["commands"]
+        assert [c["action"] for c in unlock] == ["unlock"] and pi.check(unlock[0], local) == (True, "ok")
+
+        r = reset(client).json()
+        assert r["state"] == "IDLE" and r["devices"] == ["bath-01"]
+        assert client.app.state.guard.active_incident_id is None
+        cmds = signed_poll(client).json()["commands"]
+        # alarm_off closes the Pi's incident first, so the reset that follows is obeyed.
+        assert [c["action"] for c in cmds] == ["alarm_off", "reset"]
+        assert pi.check(cmds[0], local) == (True, "ok")
+        assert pi.check(cmds[1], None) == (True, "ok")
+        assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["reason"] == "no active incident"
+
+
+def test_unlock_failed_from_the_pi_reaches_the_dashboard(client):
+    escalate(client)
+    assert post_event(client, "unlock_failed").status_code == 200
+    ev = list(client.app.state.events)[-1]
+    assert ev.type == "device_status" and ev.data == {"device_id": "bath-01", "event": "unlock_failed"}

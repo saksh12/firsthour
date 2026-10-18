@@ -315,6 +315,24 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     def resolve():
         return {"resolved": machine.resolve("operator"), **machine.snapshot()}
 
+    @app.post("/demo/reset")
+    def demo_reset(request: Request):
+        """scripts/demo_reset.sh between demo runs: back to IDLE, and a signed `reset` to
+        each Pi (lock, alarm off, clear the fusion cooldown, READY). The Pi obeys it only
+        with no local incident open; the resolve below queues alarm_off for that first."""
+        auth = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
+            log.warning("demo reset rejected: no token")
+            raise HTTPException(status_code=401, detail="token required")
+        inc = machine.incident
+        devices = set(last_heartbeat) | ({inc.device_id} if inc else set())
+        machine.resolve("demo reset")
+        for device_id in sorted(devices):
+            cmd = make_command(secret, "reset", "")
+            queues[device_id].append(cmd)
+            log.info("command queued action=reset device_id=%s id=%s", device_id, cmd.id)
+        return {"devices": sorted(devices), **machine.snapshot()}
+
     @app.websocket("/ws/dashboard")
     async def ws_dashboard(ws: WebSocket):
         """Live events for the dashboard. The first message is a full incident snapshot
