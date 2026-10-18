@@ -94,7 +94,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (A) Pi clock must be NTP-synced (or set by hand): the Pi has no RTC, and every command is refused as `stale` if its clock is >10 s off the laptop's
 - [x] (C) `voice.py`: cached ElevenLabs audio for the fixed script (`triage.QUESTIONS`), wired into `main.speak`; #3's version is not wired and its phrases drift from 11.2 (#19)
 - [ ] (C) Speech input for the person's answers: Chrome Web Speech push-to-talk + Auto-listen on the dashboard, checked with a stubbed recognizer; tick after a real-mic run on the demo laptop
-- [ ] (C) Caregiver texts the Photon agent line once before the demo (shared lines can't text first); ask the table about a dedicated line. Since #27 an alert blocked this way is shown on the dashboard and sent on their first text
+- [ ] (C) Caregiver texts the Photon agent line once before the demo (shared lines can't text first); ask the table about a dedicated line. Since #27 an alert blocked this way is shown on the dashboard and sent on their first text. **Oct 18:** Photon gives each caregiver its own shared line (`+1...4622` for the first phone, `+1...8199` for the second); the gateway now accepts replies on any of the project's lines, so `PHOTON_AGENT_HANDLE` is only the number to tell them to text
 - [x] (B) `GET /edge/commands` is unauthenticated: anyone on the LAN can drain the queue (commands are signed, so this is denial, not forgery)
 - [x] (A) Edge HTTP shares the serial loop: a blackholed backend can delay serial handling by up to `HTTP_TIMEOUT_SECONDS` once per backoff
 - [ ] (B) A late answer to Q1 after the silence escalation is filed under Q2 (now recorded as unknown, not as a wrong "no")
@@ -127,6 +127,20 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (C) Rotate the Photon outbound SIP password (it appeared in a setup tool log) and update the ElevenLabs trunk
 
 - [ ] (C/D) Speech Auto-listen starts on a backend "question played" event instead of a fixed 3 s delay: the mic can hear the laptop say "…say I'm fine…", and `is_clear_fine("say I'm fine")` is True, so it could cancel an incident
+
+## Live stress test, Sun morning (Droid)
+
+Stack with every stub off (`STUB_*=0`, real Sentry) on spare ports; the Pi-side run used `sim_sensors` + `sensor_node --stdin` + `supervisor --stdin`.
+
+- [x] (C · Droid) Gateway dropped every real caregiver reply: it only accepted replies to `PHOTON_AGENT_HANDLE`, but Photon assigns a shared line per caregiver. Fixed; a real reply reached the backend 3.5 s after it was sent
+- [x] (B · Droid) A `fall_suspected` delivered twice (Pi outbox after an uplink restart) reopened a cancelled incident and would have texted a second alert. Closed ids are now remembered and ignored
+- [x] (B · Droid) Pi still alarming for a closed incident (its safety process restarted and refused the `alarm_off` as signed before the restart) had no way out but a restart. The backend now re-sends a fresh `alarm_off` when a heartbeat still names a closed incident
+- [x] (A · Droid) `nan`/`inf` in a sensor line poisoned the accelerometer baseline for good (no falls, or every clap a fall) and an `inf` sound crashed the node. Non-finite samples are dropped
+- [x] (B · Droid) A help button on one device escalated another device's incident
+- [x] (B · Droid) StepFun rewrite/Q&A deadlines raised to 10 s / 12 s (`STEPFUN_*_TIMEOUT_S`): step-5-preview reasoned 6-12 s on every call Sunday morning, so both always fell back
+- [ ] (B) Only one incident at a time across devices: a second device's fall is ignored while another device's incident is open, and that node then alarms with no backend incident. Fine for the one-box demo; note it in the pitch
+- [ ] (A) `edge/link.py` drops a message already received when the peer closes the socket; delivery stays at-least-once (the backend dedupes), but the uplink could hand over cleanly
+- [ ] (C) Photon filters inbound texts that look like one-time codes (`listFilteredVerificationCodes`): a real `UNLOCK 1234` reply from a phone is still to be tried through the live line
 
 ## Proposed
 
