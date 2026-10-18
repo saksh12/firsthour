@@ -248,7 +248,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 emit("call_update", {"incident_id": incident_id, "status": "placed", "stub": r["stubbed"],
                                      "name": names.get(number)})
             except Exception as e:  # a failed call must never touch the incident flow
-                log.error("voice call failed incident_id=%s error=%s", incident_id, type(e).__name__)
+                detail = ""
+                if isinstance(e, urllib.error.HTTPError):
+                    # ElevenLabs explains refusals (e.g. a key missing agent permissions) in the body.
+                    try:
+                        detail = f" status={e.code} body={e.read()[:300].decode(errors='replace')}"
+                    except OSError:
+                        detail = f" status={e.code}"
+                log.error("voice call failed incident_id=%s error=%s%s", incident_id, type(e).__name__, detail)
                 emit("call_update", {"incident_id": incident_id, "status": "failed", "name": names.get(number)})
         if calls.real:
             threading.Thread(target=run, daemon=True).start()
