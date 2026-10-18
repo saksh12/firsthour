@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import time
+import urllib.error
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +35,9 @@ log = logging.getLogger("firsthour.api")
 
 HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
+# Longest we wait for the voice to report the question played before the silence timer
+# starts anyway: the assistant line plus question 1, each up to a 4 s TTS fetch on a cold cache.
+PLAYBACK_GRACE_S = 12
 WS_QUEUE_MAX = 200
 # Added by a tunnel (cloudflared, ngrok) or any proxy. The tunnel connects from 127.0.0.1,
 # so without this check the whole internet would look like the laptop.
@@ -112,6 +116,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     events: deque = deque(maxlen=500)
     outbox: list[dict] = []
     spoken: deque = deque(maxlen=100)
+    # Live Photon on a shared line can't text a caregiver who hasn't texted it first (409).
+    # Keep their alert and send it the moment they do.
+    undelivered: dict[str, tuple[str, str]] = {}
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
@@ -156,7 +163,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     r = urllib_transport(s["COMMS_GATEWAY_URL"].rstrip("/") + "/send", {},
                                          {"to": number, "body": text}, 10)
                     log.info("alert delivered incident_id=%s to=%s id=%s", incident_id, number, r.get("id"))
-                except (OSError, ValueError) as e:  # HTTPError is an OSError
+                except urllib.error.HTTPError as e:
+                    log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
+                    if e.code == 409:
+                        undelivered[number] = (incident_id, text)
+                        emit("message_out", {"to": [number], "incident_id": incident_id, "kind": "alert",
+                                             "delivered": False,
+                                             "reason": "caregiver has not texted the agent line yet"})
+                except (OSError, ValueError) as e:
                     log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
 
     def send_alert(incident_id: str, text: str) -> None:
@@ -181,6 +195,11 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         telemetry.start(incident_id, f"cmd:{cmd.id}", "command_to_pi", action="unlock")
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
+
+    def on_close(inc, final) -> None:
+        voice.flush()  # leftover questions must not play after "I'm fine" or a resolve
+        undelivered.clear()
+        close_on_pi(inc, final)
 
     def close_on_pi(inc, final) -> None:
         q = queues[inc.device_id]
@@ -209,12 +228,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
         base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,
         span=lambda **kw: telemetry.span(current_incident_id(), "voice", **kw),
+        on_played=lambda text: machine.line_played(text),
         **({"transport": s["VOICE_TRANSPORT"], "player": s["VOICE_PLAYER"]}
            if "VOICE_TRANSPORT" in s else {}),  # tests only
     )
     log.info("voice: %s", "ElevenLabs real" if voice.real else "stub (say/log only)")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
-                              emit=emit, on_close=close_on_pi, speak=speak,
+                              playback_grace_s=PLAYBACK_GRACE_S,
+                              emit=emit, on_close=on_close, speak=speak,
                               send_alert=send_alert,
                               triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
                               rewrite_fn=stepfun.rewrite)
@@ -332,6 +353,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
                 log.warning("comms inbound rejected: not from the gateway")
                 raise HTTPException(status_code=401, detail="gateway token required")
+            pending = undelivered.pop(msg.sender.strip(), None)
+            if pending and pending[0] == current_incident_id():
+                # ponytail: resends the card as first written (its "Down" time is stale);
+                # rebuild it here if the gap ever gets long.
+                log.info("resending alert now that the caregiver texted incident_id=%s to=%s",
+                         pending[0], msg.sender)
+                threading.Thread(target=deliver, args=(pending[0], [msg.sender.strip()], pending[1]),
+                                 daemon=True).start()
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")

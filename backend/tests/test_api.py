@@ -184,6 +184,40 @@ def test_real_photon_alert_goes_to_the_gateway(monkeypatch):
     assert re.search(r"Reply UNLOCK \d{4}", body["body"])
 
 
+def test_alert_blocked_by_shared_line_is_sent_once_the_caregiver_texts(monkeypatch):
+    """#26: Photon's shared line returns 409 until the caregiver has texted it once."""
+    import io
+    import threading
+    import urllib.error
+
+    sent, attempt = [], threading.Event()
+
+    def fake_transport(url, headers, body, timeout):
+        sent.append(body)
+        attempt.set()
+        if len(sent) == 1:
+            raise urllib.error.HTTPError(url, 409, "no conversation", {}, io.BytesIO(b""))
+        return {"id": "msg_2"}
+
+    monkeypatch.setattr("app.main.urllib_transport", fake_transport)
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False)))
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    assert attempt.wait(2)
+    for _ in range(100):  # the dashboard hears that it didn't go out
+        if any(e.type == "message_out" and e.data.get("delivered") is False for e in c.app.state.events):
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("no undelivered alert event")
+
+    attempt.clear()
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "hi, what happened?"},
+           headers={"Authorization": f"Bearer {SECRET}"})
+    assert attempt.wait(2)
+    assert sent[1]["to"] == CAREGIVER and sent[1]["body"] == sent[0]["body"]
+
+
 def test_help_button_escalates(client):
     post_event(client)
     post_event(client, "help_button", ts=TS + 500)
