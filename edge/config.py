@@ -66,6 +66,11 @@ WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "3"))
 # USB helper preempt transcription whenever they have work.
 WHISPER_PRIORITY = int(os.getenv("WHISPER_PRIORITY", "8"))
 WHISPER_TIMEOUT_S = _f("WHISPER_TIMEOUT_SECONDS", "10")
+
+# Process split (edge/supervisor.py): QNX priorities. User processes default to 10, so the
+# safety process preempts the uplink, whisper and anything else a user starts.
+SAFETY_PRIORITY = int(os.getenv("SAFETY_PRIORITY", "21"))
+UPLINK_PRIORITY = int(os.getenv("UPLINK_PRIORITY", "10"))
 AUDIO_FETCH_TIMEOUT_S = _f("AUDIO_FETCH_TIMEOUT_SECONDS", "5")
 
 LOG_DIR = Path(os.getenv("EDGE_LOG_DIR", str(REPO / "edge" / "logs")))

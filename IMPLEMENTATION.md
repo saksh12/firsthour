@@ -346,8 +346,6 @@ On only with `PI_STT=1` on the backend and `WHISPER_MODEL` set on the Pi. The mi
 
 All three `/person/*` routes are laptop-only and answer 404 while `PI_STT=0`. The words are never logged on either side; logs keep clip id, latency, length and word count.
 
----
-
 ### 6.9 Companion agent after the fixed script (ElevenLabs Agents)
 
 The first check uses five fixed questions, cached laptop playback, and Pi transcription. It still needs the laptop and the local Pi connection; StepFun receives transcripts for enrichment and remote messaging needs internet access. The Pi's alarm and clock do not depend on any of those services. After the fifth question, the box says "Thank you. That's all my questions." Only when that audio finishes does `script_done` start an ElevenLabs Agents session on the laptop microphone and AirPods. The line makes no claim that the companion connected or that a caregiver received the alert.
@@ -359,6 +357,33 @@ The first check uses five fixed questions, cached laptop playback, and Pi transc
 - Dependency: `@elevenlabs/client@1.28.0`, loaded by the dashboard from esm.sh.
 - **Failure handling:** the dashboard shows connecting, connected, off, and disconnected states, with a retry button on failure. It does not claim to be listening when startup fails. Backend disconnection closes the agent session. A session finishing startup after a resolve is closed rather than attached to a later incident. Use one microphone-enabled dashboard tab.
 - Prompts and runtime limits: `docs/voice-prompts.md`. Backend checks: `pytest -q tests/test_companion.py`; frontend checks: `node --test dashboard/companion.test.cjs`.
+
+---
+
+### 6.10 Pi processes (issue #22 step 1)
+
+`edge/supervisor.py` runs the Pi as separate processes at fixed QNX priorities (`on -p`), so `pidin` shows the split. The single-process reader (`sensor_node.py --usb`) still works unchanged.
+
+| Process | Priority | Job |
+| --- | --- | --- |
+| safety (`sensor_node.py --uplink-socket`) | 21 (`SAFETY_PRIORITY`) | Sensors via its USB helper, fusion, local incident, alarm, clock, display. Holds `SHARED_SECRET`: signs every event, heartbeat, poll and clip fetch, and verifies every command. Only writer to the hub, so only it can send `U` |
+| uplink (`uplink.py`) | 10 (`UPLINK_PRIORITY`) | HTTP to the backend: outbox delivery, heartbeats, command polls, clip fetch and the whisper call. Signs and verifies nothing. Allowed to hang or die |
+| whisper-server | 8 (`WHISPER_PRIORITY`) | Speech-to-text on `127.0.0.1` only, when `WHISPER_MODEL` is set |
+
+The two Python processes talk over one Unix stream socket (`edge/logs/uplink.sock`, mode 600) carrying newline-delimited JSON (`edge/link.py`):
+
+- safety → uplink: `event {raw, sig}` (every outbox item, resent to each new uplink), `poll {ts, sig}`, `heartbeat {raw, sig}`, `transcribe {clip_id, incident_id, ts, sig}`.
+- uplink → safety: `ack {sig}` (delivered, so the safety process drops it from the outbox), `poll` and `heartbeat` (requests for a signature), `commands {commands}` (passed through unverified), `speech {clip_id, result}` (accepted only for a clip the safety process dispatched).
+
+Rules:
+
+1. The safety process never blocks on the link. It reads and writes only what is ready, and drops an uplink whose unread data passes 1 MB.
+2. Uplink gone: the alarm, clock, display and latch checks carry on, events wait in the outbox, a pending clip answers `speech_text` with an error (so silence still escalates), and `transcribe` answers "uplink down" at once.
+3. The supervisor restarts a dead child after 1 s, doubling the wait (up to 30 s) for a child that dies within 5 s of starting. QNX's HAM is not on the image.
+4. A restarted safety process (`--resume`) picks up its open incident from `edge/logs/incident.json` (same id, same clock, alarm on, latch locked when the hub reconnects) and refuses any command signed before it started, because its nonce cache is empty. A transcript for a clip the old process dispatched is refused too (the uplink can never inject speech), so the backend's bounded speech hold runs out and counts it as silence. A fresh supervisor start begins clean.
+5. SIGTERM to the supervisor stops every child.
+
+Checked on the Pi (QNX 8, Pi 5, BOX-3 on USB, Oct 18): `pidin` showed the safety process and its USB helper at 21, the uplink and the supervisor at 10, `whisper-server` at 8. `kill -9` of the uplink (idle, and 3 s into a knock incident): the safety process carried on and the new uplink reached the backend 1.6-1.8 s after the kill. `kill -9` of the safety process (3 times idle, once 15 s into the incident): restarted with `--resume` and reclaimed the hub 1.8-3.9 s after the kill; the incident kept its id and clock, the alarm and `TIME DOWN` were re-sent when the hub reconnected, and a later signed `alarm_off` and `reset` were accepted.
 
 ## 7. The phases (step by step)
 

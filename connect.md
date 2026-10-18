@@ -144,6 +144,23 @@ helper, `whisper-server` at priority 8) and a fresh heartbeat after the
 launching SSH session exits. This does not configure automatic startup after a
 Pi reboot.
 
+### Split mode (issue #22 step 1)
+
+To run the safety process and the uplink as separate QNX processes, launch the
+supervisor instead of the reader (same stop rule: SIGTERM, here to the
+supervisor's PID, stops every child):
+
+```bash
+cd /data/home/qnxuser/firsthour
+sudo -n sh -c 'WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin nohup /data/home/qnxuser/fh-venv/bin/python -u edge/supervisor.py --usb --backend http://172.20.10.2:8002 >> edge/logs/reader-stderr.log 2>&1 </dev/null &'
+```
+
+Deploy `edge/link.py`, `edge/uplink.py` and `edge/supervisor.py` with the three
+files above. `sudo -n pidin` shows the safety process (and its USB helper) at
+priority 21, the uplink at 10 and `whisper-server` at 8; the log line
+`started <child> pid=` gives each PID. Checked on the Pi on Oct 18, including
+`kill -9` of each child during a knock incident (IMPLEMENTATION.md 6.10).
+
 ## 5. Reset a demo incident
 
 From the **Mac repository root**, run:
