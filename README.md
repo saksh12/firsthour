@@ -5,6 +5,7 @@ A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Ard
 - [`AGENTS.md`](AGENTS.md): rules and contracts (read first)
 - [`IMPLEMENTATION.md`](IMPLEMENTATION.md): full build plan
 - [`TODOS.md`](TODOS.md): task board
+- [`docs/mission-control.html`](docs/mission-control.html): interactive concept of the demo (simulated data). Share it with `scripts/share_concept.sh`, which prints a temporary public link
 
 ## Status
 
