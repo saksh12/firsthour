@@ -24,6 +24,12 @@ def sign_event(secret, ts, raw_body):
     return _hmac_hex(secret, f"{ts}.".encode() + raw_body)
 
 
+def sign_poll(secret, ts, device_id):
+    """X-Signature for GET /edge/commands: hex(HMAC_SHA256(secret, ts + "." + device_id)).
+    Without it anyone on the Wi-Fi could poll first and swallow the Pi's unlock."""
+    return _hmac_hex(secret, f"{ts}.{device_id}".encode())
+
+
 # Commands that act on one incident. The Pi only obeys them for its own open incident,
 # so a stale backend incident can never unlock the door or silence a newer fall.
 INCIDENT_ACTIONS = ("unlock", "alarm_off")

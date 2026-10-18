@@ -144,13 +144,13 @@ Grow a file before you split it. Do not add packages, layers or abstractions tha
 | --- | --- |
 | `device_id` | e.g. `bath-01` |
 | `ts` | epoch ms |
-| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Pi opened the latch) \| `cancelled` |
+| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Arduino answered `ACK,U`) \| `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`) \| `cancelled` |
 | `sensors` | `{sound_peak, accel_delta_g, dist_cm}` |
 | `local_incident_id` | `<device_id>-<ts>` |
 
 Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
-**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01` every 1 s. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display`. `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
+**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01&ts=<ms>` every 1 s, header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id))`. A missing, bad, stale (> 10 s) or replayed (`ts` not newer than the last accepted poll) signature gets 401 and leaves the queue alone. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display` \| `reset` (demo reset: lock, alarm off, clear the fusion cooldown, `READY`; obeyed only with no local incident open; `incident_id` is `""`). `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
 
 **Incident states**: `IDLE` → `CHECKING` → (`CANCELLED` on "I'm fine" | `ALERTING` on help or 8 s silence) → `RESPONDING` on any caregiver reply → `UNLOCKED` on accepted unlock → `RESOLVED` → `IDLE`.
 
