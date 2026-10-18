@@ -80,7 +80,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (A) `arduino/hub/hub.ino`: no PR adds it yet (IMPLEMENTATION.md 8.3 is the starting point)
 - [ ] (A) Pi clock must be NTP-synced (or set by hand): the Pi has no RTC, and every command is refused as `stale` if its clock is >10 s off the laptop's
 - [x] (C) `voice.py`: cached ElevenLabs audio for the fixed script (`triage.QUESTIONS`), wired into `main.speak`; #3's version is not wired and its phrases drift from 11.2 (#19)
-- [ ] (C) Speech input for the person's answers (today only the typed box)
+- [ ] (C) Speech input for the person's answers: Chrome Web Speech push-to-talk + Auto-listen on the dashboard, checked with a stubbed recognizer; tick after a real-mic run on the demo laptop
 - [ ] (C) Caregiver texts the Photon agent line once before the demo (shared lines can't text first); ask the table about a dedicated line. Since #27 an alert blocked this way is shown on the dashboard and sent on their first text
 - [x] (B) `GET /edge/commands` is unauthenticated: anyone on the LAN can drain the queue (commands are signed, so this is denial, not forgery)
 - [x] (A) Edge HTTP shares the serial loop: a blackholed backend can delay serial handling by up to `HTTP_TIMEOUT_SECONDS` once per backoff
@@ -111,6 +111,8 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [x] (B · Claude) pytest never reports to the real Sentry project (#29): local runs were filing issues and emails
 - [x] (C) Photon SMS number + Voice profile connected to the ElevenLabs agent "FirstHour Caregiver Line" over SIP/TLS; inbound and outbound test calls passed on a real phone. Backend still has to place the call (#23 item 3)
 - [ ] (C) Rotate the Photon outbound SIP password (it appeared in a setup tool log) and update the ElevenLabs trunk
+
+- [ ] (C/D) Speech Auto-listen starts on a backend "question played" event instead of a fixed 3 s delay: the mic can hear the laptop say "…say I'm fine…", and `is_clear_fine("say I'm fine")` is True, so it could cancel an incident
 
 ## Proposed
 
