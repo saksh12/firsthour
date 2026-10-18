@@ -8,6 +8,10 @@ import pytest
 os.environ.setdefault("SHARED_SECRET", "test-secret")
 # No audio on CI/dev machines: speak() becomes a no-op unless a test opts in.
 os.environ.setdefault("VOICE_PLAYBACK", "0")
+# Never report to the real Sentry project: the module-level app reads the root .env, and
+# its global SDK client would turn every log.error a test provokes into an issue email.
+# Forced, not setdefault: load_dotenv never overrides a variable that is already set.
+os.environ["SENTRY_DSN"] = ""
 
 # Make both `app` (backend) and `edge` importable, so one pytest run covers
 # both sides of the unlock contract.
