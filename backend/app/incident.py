@@ -37,6 +37,7 @@ class Incident:
     question_index: int = 0
     triage: TriageRecord = field(default_factory=TriageRecord)
     unlocked_until: Optional[float] = None
+    refining: bool = False  # a StepFun refinement is in flight
 
 
 def _noop(*_args) -> None:
@@ -159,17 +160,34 @@ class IncidentMachine:
             if inc.state == S.CHECKING:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
             self._ask()
+            # One StepFun call per incident at a time: answers come every 2-3 s and a call
+            # takes 5-13 s, so the running one picks up whatever arrived meanwhile.
+            start, inc.refining = not inc.refining, True
 
         # StepFun takes seconds; the caller (and the person's next answer) never waits on it.
-        self._background(lambda: self._refine(inc, answers))
+        if start:
+            self._background(lambda: self._refine(inc))
 
-    def _refine(self, inc: Incident, answers: list[tuple[str, str]]) -> None:
-        triage = self._triage_fn(answers, self.profile)  # StepFun: up to 15 s, then rules
-        with self._lock:
-            # A newer answer (or the end of the incident) makes this result stale.
-            if self.incident is inc and len(inc.answers) == len(answers) and triage != inc.triage:
-                inc.triage = triage
-                self._emit_triage(inc)
+    def _refine(self, inc: Incident) -> None:
+        try:
+            while True:
+                with self._lock:
+                    answers = list(inc.answers)
+                triage = self._triage_fn(answers, self.profile)  # StepFun: up to 15 s, then rules
+                with self._lock:
+                    if self.incident is not inc:
+                        return  # the incident ended while the model was thinking
+                    if len(inc.answers) != len(answers):
+                        continue  # stale: run once more on the latest answers
+                    inc.refining = False
+                    if triage != inc.triage:
+                        inc.triage = triage
+                        self._emit_triage(inc)
+                    return
+        except Exception:  # the rule record stands; never wedge later refinements
+            log.exception("triage refinement failed incident_id=%s", inc.id)
+            with self._lock:
+                inc.refining = False
 
     def on_help_button(self) -> None:
         with self._lock:
