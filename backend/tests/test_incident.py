@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from app.incident import IncidentMachine
+from app.incident import CLOSING_LINE, IncidentMachine
 from app.models import IncidentState as S
 from app.profile import DEMO_PROFILE
 from app.triage import QUESTIONS, parse_rules
@@ -164,7 +164,7 @@ def test_later_answers_update_triage_and_walk_the_script(m, rec):
         m.on_answer(a)
     t = m.incident.triage
     assert (t.head_strike, t.pain_location, t.can_move, t.bleeding, t.done) == (False, "right hip", False, False, True)
-    assert rec.spoken == [ASSISTANT_LINE] + [q for _, q in QUESTIONS]
+    assert rec.spoken == [ASSISTANT_LINE] + [q for _, q in QUESTIONS] + [CLOSING_LINE]
     m.on_answer("extra")  # past the script: ignored, no crash
     assert len(m.incident.answers) == 5
 
@@ -175,7 +175,7 @@ def test_caregiver_message_moves_to_responding_and_is_read_aloud(m, rec):
     r = m.caregiver_reply(CAREGIVER, "Hang in there, I love you")
     assert r == {"type": "message", "accepted": True}
     assert m.state == S.RESPONDING
-    assert rec.spoken[-1] == "Hang in there, I love you"
+    assert rec.spoken[-2] == "Hang in there, I love you"
 
 
 def test_stranger_message_is_dropped_and_not_read_aloud(m, rec):

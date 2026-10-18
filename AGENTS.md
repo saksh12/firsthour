@@ -29,7 +29,7 @@ Every sponsor below has a real job in the pipeline. If a change would break one 
 | **StepFun**: Get It Done with Step 5 Preview | App **must call `step-5-preview` at runtime**. Explain what every other model does. Judged on task completion, reliability, user understanding and control | Turns spoken answers into the triage record, writes the handoff summary, rewrites caregiver replies into one calm sentence |
 | **Photon**: Messaging/Calling Agent | Build on **Photon 2.0 beta** | `comms-gateway/`: alert text out, caregiver reply in. Voice calls only if confirmed available (`TODO(verify)`) |
 | **Sentry**: Best Use of Sentry | **≥2 products beyond error monitoring**, and show how they shaped the build | Tracing (one trace per incident), Uptime Monitoring (`/health` via tunnel), Logs (unlock audit trail), Session Replay optional |
-| **MLH**: Best Use of ElevenLabs | Use ElevenLabs | TTS for every fixed phrase (pre-cached), plus STT if our tier supports it |
+| **MLH**: Best Use of ElevenLabs | Use ElevenLabs | TTS for every fixed phrase (pre-cached); an Agents voice call to a silent caregiver; after the fixed script, a companion agent that talks with the person and decides what to relay to the caregiver (IMPLEMENTATION.md 6.9) |
 | **Paper** *or* **Base44** (pick one) | Paper: design craft. Base44: real problem, usable product | `dashboard/`. Decide by 3:00 PM Sat, do not chase both |
 | **Cognition**: Best Use of Devin (optional) | Build with Devin | Only claim it if Devin actually built something; note what |
 
@@ -92,7 +92,7 @@ Key decisions (already made; don't relitigate):
 3. **The Pi polls `GET /edge/commands` every second.** No inbound connections to the Pi.
 4. **Two sensors must agree** (sound + accelerometer within 400 ms). Ultrasonic only adds confidence; never require it.
 5. **Silence escalates.** Only a clear "I'm fine" cancels an incident.
-6. **The question script is fixed.** The first "Are you okay?" is pre-recorded and plays with no model call.
+6. **The question script is fixed.** The first "Are you okay?" is pre-recorded and plays with no model call. After the alert, an unanswered question (silence, or speech-to-text failed) is asked once more, then left unknown. Only **after** the five questions does an ElevenLabs companion agent talk freely with her (6.9); it never replaces or changes the triage script.
 7. **`on_blood_thinner` and medications come from the patient profile**, never from a model.
 8. **The caregiver simulator page is a first-class path**, not a hack. It posts to the same inbound endpoint Photon uses.
 
@@ -158,9 +158,9 @@ Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
 **Triage record** (StepFun output, pydantic-validated): `conscious, head_strike, pain_location, can_move, bleeding, on_blood_thinner, summary, next_question, done`. Unknown = `null`, never a guess.
 
-**Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. The first alert asks "How soon can you be here?" and carries **no code**. A clear "on my way" / ETA / "I'm here" (regex, `backend/app/coordinator.py`; hedges like "I might come" never count) claims the incident, is read aloud from a fixed template, and gets the one-time door code texted back to that caregiver only (also after a voice call where they committed). No reply at all within `VOICE_CALL_AFTER_SECONDS` places a voice call; any reply stops it. A question (StepFun, `?` fallback) is answered by text from incident facts only, never the code. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud. Nothing said on a voice call is ever an unlock.
+**Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. The first alert asks "How soon can you be here?" and carries **no code**. A clear "on my way" / ETA / "I'm here" (regex, `backend/app/coordinator.py`; hedges like "I might come" never count) claims the incident, is read aloud from a fixed template, and gets the one-time door code texted back to that caregiver only (also after a voice call where they committed). No reply at all within `VOICE_CALL_AFTER_SECONDS` places a voice call; any reply stops it. A question (StepFun, `?` fallback) is answered by text from incident facts only, never the code. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud, then the pending question is asked again. Nothing said on a voice call is ever an unlock. The companion agent can text the caregiver what she said (`relay`, to the claimer, else everyone; at most 6 per incident, never the code).
 
-**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`, `question_played`, `speech_heard`, `voice_line`, `delivery_status {status: queued|sent|blocked|failed|acknowledged|responder_assigned}`, `responder_update`, `call_update` (issue #23; "sent" = Photon API accepted, never "delivered").
+**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`, `question_played`, `speech_heard`, `voice_line`, `script_done` (the five questions are over: the dashboard starts the companion), `delivery_status {status: queued|sent|blocked|failed|acknowledged|responder_assigned}`, `responder_update`, `call_update` (issue #23; "sent" = Photon API accepted, never "delivered").
 
 ## Unlock rules (non-negotiable; judges will poke at this)
 
@@ -292,7 +292,7 @@ bash scripts/demo_reset.sh
 - Python: type hints on public functions, pydantic for every contract, `ruff format` if installed. TypeScript: strict, no `any` on contract types. Arduino: no `delay()` in `loop()`; use `millis()`. Comments explain why, not what.
 - Tell the team before adding a dependency, and pin its version.
 - After the **8:30 AM freeze**: bug fixes only, each tested three times.
-- Do not add: cameras or video, a login system, cloud hosting for the backend, ML fall models that replace the two-sensor rule, LLM-generated questions, both Paper and Base44, or anything else not in `IMPLEMENTATION.md`. If you think something is missing, add it to `TODOS.md` under "Proposed" and keep going.
+- Do not add: cameras or video, a login system, cloud hosting for the backend, ML fall models that replace the two-sensor rule, LLM-generated triage questions (the companion agent after the script is the one exception, 6.9), both Paper and Base44, or anything else not in `IMPLEMENTATION.md`. If you think something is missing, add it to `TODOS.md` under "Proposed" and keep going.
 - **Never weaken a rule in "Unlock rules" or "Safety and ethics rules".**
 
 ## Escalation

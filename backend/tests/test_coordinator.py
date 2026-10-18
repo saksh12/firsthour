@@ -95,7 +95,7 @@ def test_first_clear_claim_wins_and_others_stand_by(m, rec):
     r = m.caregiver_reply(CAREGIVER, "on my way, 10 min")
     assert r == {"type": "commitment", "accepted": True, "status": "arriving", "eta_min": 10, "assigned": True}
     assert m.state == S.RESPONDING
-    assert rec.spoken[-1] == "Sarah is about 10 minutes away."
+    assert rec.spoken[-2] == "Sarah is about 10 minutes away."
     assert ((BACKUP,), "stand_by", "Sarah is on the way. Please stand by; we'll text if that changes.") in rec.texts
     ack = [t for t in rec.texts if t[1] == "code"][0]
     assert ack[0] == (CAREGIVER,) and "You said 10 minutes" in ack[2]
@@ -114,14 +114,14 @@ def test_first_clear_claim_wins_and_others_stand_by(m, rec):
 def test_eta_then_arrived_updates_the_same_responder(m, rec):
     m.caregiver_reply(CAREGIVER, "omw")
     m.caregiver_reply(CAREGIVER, "I'm here")
-    assert rec.spoken[-1] == "Sarah is at the door."
+    assert rec.spoken[-2] == "Sarah is at the door."
     assert [d["status"] for d in rec.of("responder_update")] == ["accepted", "arrived"]
 
 
 def test_hedge_is_not_a_claim_and_is_read_aloud(m, rec):
     r = m.caregiver_reply(CAREGIVER, "I might come")
     assert r == {"type": "message", "accepted": True}
-    assert rec.spoken[-1] == "I might come"
+    assert rec.spoken[-2] == "I might come"
     assert m.incident.claimed_by is None and rec.of("responder_update") == []
 
 
@@ -144,7 +144,7 @@ def test_model_can_route_a_question_shaped_message_to_read_aloud(clock, rec):
     mm.on_answer("help")
     r = mm.caregiver_reply(CAREGIVER, "Can you tell her I love her?")
     assert r == {"type": "message", "accepted": True}
-    assert rec.spoken[-1] == "Can you tell her I love her?"
+    assert rec.spoken[-2] == "Can you tell her I love her?"
 
 
 def test_template_answer_is_the_default(clock, rec):
@@ -235,7 +235,7 @@ def test_call_after_none_disables_calls(clock, rec):
 def test_call_result_records_commitment_and_texts_back(m, rec):
     r = m.record_call_result("inc-1", CAREGIVER, ["Oh no.", "I'll be there in 5 minutes"], "Sarah will come.")
     assert r["status"] == "arriving" and r["eta_min"] == 5 and r["assigned"]
-    assert rec.spoken[-1] == "Sarah is about 5 minutes away."
+    assert rec.spoken[-2] == "Sarah is about 5 minutes away."
     ack = [t for t in rec.texts if t[1] == "code"][-1]
     assert ack[0] == (CAREGIVER,) and ack[2].startswith("You said 5 minutes on the call.")
     assert f"reply UNLOCK {code_of(m)}." in ack[2]  # the code is texted after the call, never spoken

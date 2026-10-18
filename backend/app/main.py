@@ -23,9 +23,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
-from .calls import VoiceCalls, parse_postcall, verify_postcall_signature
+from .calls import VoiceCalls, companion_token, parse_postcall, verify_postcall_signature
 from .coordinator import parse_names, parse_order
-from .incident import IncidentMachine
+from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
@@ -75,6 +75,11 @@ class PersonAnswer(BaseModel):
     text: str
 
 
+class CompanionRelay(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    urgency: str = Field(default="normal", pattern="^(normal|urgent)$")
+
+
 class PersonListening(BaseModel):
     seconds: float = Field(gt=0, le=15)  # how long the dashboard records her answer
 
@@ -106,6 +111,7 @@ def load_settings() -> dict:
         "ELEVENLABS_PHONE_NUMBER_ID": os.getenv("ELEVENLABS_PHONE_NUMBER_ID", ""),
         "ELEVENLABS_WEBHOOK_SECRET": os.getenv("ELEVENLABS_WEBHOOK_SECRET", ""),
         "VOICE_TOOL_TOKEN": os.getenv("VOICE_TOOL_TOKEN", ""),
+        "ELEVENLABS_COMPANION_AGENT_ID": os.getenv("ELEVENLABS_COMPANION_AGENT_ID", ""),
         "VOICE_CALL_AFTER_SECONDS": float(os.getenv("VOICE_CALL_AFTER_SECONDS", "20")),
         "PI_STT": os.getenv("PI_STT", "0") == "1",
         "PI_STT_HOLD_S": float(os.getenv("PI_STT_HOLD_SECONDS", "20")),
@@ -344,7 +350,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                               rewrite_fn=stepfun.rewrite,
                               send_text=send_text, place_call=place_call, answer_fn=stepfun.answer,
                               call_order=parse_order(s["CAREGIVER_NUMBERS"]) or None, names=names,
-                              call_after_s=s.get("VOICE_CALL_AFTER_SECONDS", 20))
+                              call_after_s=s.get("VOICE_CALL_AFTER_SECONDS", 20), reask=s["PI_STT"])
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -358,7 +364,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 await asyncio.sleep(TICK_S)
 
         # Pre-generate the fixed script so the first question plays with no API call.
-        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE])
+        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE, REASK_LINE, CLOSING_LINE])
         task = asyncio.create_task(ticker())
         yield
         task.cancel()
@@ -616,6 +622,38 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         facts = machine.facts()
         return {"active": True, **facts} if facts else {
             "active": False, "unlock_policy": "Voice can never unlock the door."}
+
+    # --- companion: an ElevenLabs agent in the dashboard talks with her after the fixed script.
+    # Its tools are client tools that run in the dashboard and call these laptop-only routes,
+    # so nothing about it is reachable through the tunnel.
+
+    @app.get("/companion/session", dependencies=[Depends(laptop_only)])
+    def companion_session():
+        agent = s.get("ELEVENLABS_COMPANION_AGENT_ID", "")
+        if s.get("STUB_ELEVENLABS", True) or not agent or not s.get("ELEVENLABS_API_KEY"):
+            return {"enabled": False}
+        facts = machine.facts()
+        if not facts or facts["state"] == "CHECKING":
+            raise HTTPException(status_code=409, detail="no alerted incident")
+        try:
+            token = companion_token(s["ELEVENLABS_API_KEY"], agent, s.get("ELEVENLABS_BASE_URL", ""))
+        except Exception as e:
+            log.error("companion token failed error=%s", type(e).__name__)
+            raise HTTPException(status_code=502, detail="could not start the companion")
+        log.info("companion session token issued incident_id=%s", current_incident_id())
+        return {"enabled": True, "token": token,
+                "variables": {"patient_name": facts["patient"], "room": facts["room"]}}
+
+    @app.get("/companion/facts", dependencies=[Depends(laptop_only)])
+    def companion_facts():
+        """get_incident_facts: the same code-free facts the caregiver call agent sees."""
+        facts = machine.facts()
+        return {"active": True, **facts} if facts else {"active": False}
+
+    @app.post("/companion/relay", dependencies=[Depends(laptop_only)])
+    def companion_relay(body: CompanionRelay):
+        """relay_to_caregiver: the agent decided something she said matters."""
+        return machine.companion_relay(body.message, body.urgency)
 
     @app.get("/incident")
     def incident():

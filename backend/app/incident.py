@@ -32,6 +32,12 @@ from .voice import ASSISTANT_LINE
 
 log = logging.getLogger("firsthour.incident")
 
+REASK_LINE = "Sorry, I didn't catch that."
+MAX_TRIES = 2  # asks per question after the alert; then it stays unknown and the script moves on
+CLOSING_LINE = "Thank you. That's all my questions. I've told your family, and I'm staying right here with you."
+RELAY_MAX = 6  # companion relays per incident, so a looping agent can't flood the caregiver
+RELAY_MAX_CHARS = 300
+
 Emit = Callable[[str, dict], None]
 
 
@@ -53,6 +59,9 @@ class Incident:
     last_call_at: Optional[float] = None
     call_notes: list[str] = field(default_factory=list)
     code: str = field(default="", repr=False)  # texted only to a caregiver who commits; never in snapshot/facts
+    misses: int = 0  # unanswered asks of the current question (after the alert)
+    script_done: bool = False
+    relays: int = 0
 
 
 def _noop(*_args) -> None:
@@ -94,6 +103,7 @@ class IncidentMachine:
         call_order: Optional[list[str]] = None,
         names: Optional[dict[str, str]] = None,
         call_after_s: Optional[float] = 20,
+        reask: bool = False,
     ):
         self.guard = guard
         self.profile = profile
@@ -118,6 +128,9 @@ class IncidentMachine:
         self.call_order = [n for n in (call_order or sorted(guard.allowed)) if n in guard.allowed]
         self.names = names or {}
         self.call_after_s = call_after_s  # None: no voice escalation
+        # After the alert, an unanswered question is asked again, then skipped. Only with a
+        # listening mic (PI_STT): with typed answers the operator sets the pace.
+        self.reask = reask
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
         self._question_heard_at: Optional[float] = None
@@ -208,6 +221,7 @@ class IncidentMachine:
                          question_index, inc.question_index, inc.id)
                 return False
             self._speech_hold_until = None
+            inc.misses = 0
             key = QUESTIONS[inc.question_index][0]
             inc.answers.append((key, text))
 
@@ -223,6 +237,7 @@ class IncidentMachine:
             if inc.state == S.CHECKING:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
             self._ask()
+            self._maybe_script_done(inc)
             # One StepFun call per incident at a time: answers come every 2-10 s and a call
             # takes 5-38 s, so the running one picks up whatever arrived meanwhile.
             start, inc.refining = not inc.refining, True
@@ -235,7 +250,7 @@ class IncidentMachine:
     def hold_for_speech(self, seconds: float) -> None:
         """A clip with sound in it is being transcribed on the Pi: don't call it silence yet."""
         with self._lock:
-            if self.incident and self.incident.state == S.CHECKING:
+            if self.incident and self._current_question():
                 self._speech_hold_until = self._clock() + seconds
                 log.info("silence timer held up to %.0f s for speech-to-text incident_id=%s",
                          seconds, self.incident.id)
@@ -330,6 +345,7 @@ class IncidentMachine:
             if inc.state == S.ALERTING:
                 self._set(S.RESPONDING, "caregiver replied")
             self._speak(spoken)
+            self._resume_script(inc)
             return {"type": "message", "accepted": True}
 
     def record_call_result(self, incident_id: Optional[str], number: Optional[str],
@@ -371,7 +387,7 @@ class IncidentMachine:
             inc = self.incident
             if not inc or text != self._current_question():
                 return
-            if inc.state == S.CHECKING and self._question_heard_at is None:
+            if self._question_heard_at is None:
                 self._question_heard_at = self._clock()
             # The dashboard starts recording the answer only now, so it never hears the question.
             self._emit("question_played", {"incident_id": inc.id, "question_index": inc.question_index,
@@ -408,6 +424,9 @@ class IncidentMachine:
             elif inc.state == S.UNLOCKED and inc.unlocked_until and now >= inc.unlocked_until:
                 inc.unlocked_until = None
                 self._set(S.RESPONDING, "unlock hold ended")
+            if (self.reask and inc.state != S.CHECKING and self._current_question()
+                    and now - heard_at >= self.silence_s and not held):
+                self._missed(inc)
             self._maybe_call(inc, now)
 
     # --- internals ----------------------------------------------------------
@@ -424,6 +443,61 @@ class IncidentMachine:
         if q:
             self._question_asked_at, self._question_heard_at = self._clock(), None
             self._speak(q)
+
+    def _missed(self, inc: Incident) -> None:
+        """No usable answer (silence, or speech-to-text failed or timed out): ask once more,
+        then leave it unknown and move on, so the conversation never just stops."""
+        self._speech_hold_until = None
+        inc.misses += 1
+        if inc.misses < MAX_TRIES:
+            log.info("no answer to question %d, asking again incident_id=%s", inc.question_index, inc.id)
+            self._speak(REASK_LINE)
+        else:
+            log.info("no answer to question %d after %d asks, moving on incident_id=%s",
+                     inc.question_index, inc.misses, inc.id)
+            inc.misses = 0
+            inc.question_index += 1
+            self._emit_triage(inc)
+        self._ask()
+        self._maybe_script_done(inc)
+
+    def _resume_script(self, inc: Incident) -> None:
+        """After a caregiver update is read aloud, ask the pending question again so she
+        knows the conversation is still going."""
+        if inc.state != S.CHECKING and self._current_question():
+            self._ask()
+
+    def _maybe_script_done(self, inc: Incident) -> None:
+        if inc.script_done or inc.state == S.CHECKING or self._current_question():
+            return
+        inc.script_done = True
+        self._speak(CLOSING_LINE)
+        log.info("question script finished incident_id=%s", inc.id)
+        # The dashboard hands her side of the conversation to the companion agent, if configured.
+        self._emit("script_done", {"incident_id": inc.id})
+
+    def companion_relay(self, message: str, urgency: str = "normal") -> dict:
+        """The companion agent judged something she said worth texting: to whoever claimed the
+        incident, else every caregiver. Text only; it can never unlock or change the triage."""
+        message = " ".join(message.split())[:RELAY_MAX_CHARS]
+        with self._lock:
+            inc = self.incident
+            if not inc or inc.state == S.CHECKING:
+                return {"sent": False, "reason": "no alerted incident"}
+            if not message:
+                return {"sent": False, "reason": "empty message"}
+            if inc.code and inc.code in message:
+                log.warning("companion relay refused: contains the door code incident_id=%s", inc.id)
+                return {"sent": False, "reason": "refused"}
+            if inc.relays >= RELAY_MAX:
+                return {"sent": False, "reason": "relay limit reached"}
+            inc.relays += 1
+            to = [inc.claimed_by] if inc.claimed_by else sorted(self.guard.allowed)
+            prefix = "URGENT: " if urgency == "urgent" else ""
+            text = f'{prefix}FirstHour: {self.profile["name"]} says: "{message}"'
+            log.info("companion relay #%d urgency=%s to=%s incident_id=%s", inc.relays, urgency, to, inc.id)
+            self._send_text(inc.id, to, text, "relay")
+            return {"sent": True, "to": "claimer" if inc.claimed_by else "all caregivers"}
 
     def _emit_triage(self, inc: Incident) -> None:
         self._emit("triage_update", {"incident_id": inc.id, "triage": inc.triage.model_dump(),
@@ -459,6 +533,7 @@ class IncidentMachine:
         if inc.state == S.ALERTING:
             self._set(S.RESPONDING, "caregiver claimed" if first else "caregiver replied")
         self._speak(spoken_line(r["name"], Commitment(c.status, r["eta_min"])))
+        self._resume_script(inc)
         # kind "code": the dashboard is told a code text went out, never its text.
         self._send_text(inc.id, [sender], claimer_reply(Commitment(c.status, r["eta_min"]), inc.code, via_call),
                         "code" if inc.code else "ack")

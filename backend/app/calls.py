@@ -12,8 +12,11 @@ the texted UNLOCK <code> path.
 
 import hashlib
 import hmac
+import json
 import logging
 import time
+import urllib.parse
+import urllib.request
 from typing import Callable, Optional
 
 from .triage import urllib_transport
@@ -56,6 +59,22 @@ class VoiceCalls:
         if r.get("success") is False:
             raise RuntimeError(f"outbound call refused: {r.get('message', '')}"[:200])
         return {"conversation_id": r.get("conversation_id") or "", "stubbed": False}
+
+
+TOKEN_PATH = "/v1/convai/conversation/token"
+
+
+def companion_token(api_key: str, agent_id: str, base_url: str = "", timeout_s: float = 10) -> str:
+    """A short-lived WebRTC conversation token for the browser, so the API key stays on the laptop
+    backend. https://elevenlabs.io/docs/eleven-agents/libraries/java-script (private agents)."""
+    url = (base_url or API_BASE).rstrip("/") + TOKEN_PATH + "?" + urllib.parse.urlencode({"agent_id": agent_id})
+    req = urllib.request.Request(url, headers={"xi-api-key": api_key})
+    with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        body = json.loads(r.read())
+    token = body.get("token") or body.get("conversation_token")
+    if not token:
+        raise RuntimeError("no token in ElevenLabs response")
+    return token
 
 
 def verify_postcall_signature(secret: str, raw: bytes, header: Optional[str],

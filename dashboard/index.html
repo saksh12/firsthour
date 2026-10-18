@@ -487,6 +487,8 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       for (const r of d.responders || []) view.responders[r.number] = r;
     }
     pi.setAvailable(!!d.pi_stt);
+    // Page reloaded after the script finished: pick the companion back up.
+    if (d.incident_id && d.state !== "CHECKING" && !d.current_question) companion.start(d.incident_id);
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
   }
 
@@ -495,11 +497,13 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       case "incident_update":
         if (d.snapshot) { onSnapshot(d); break; }
         if (d.state === "IDLE") {
+          companion.stop();
           view = blank();
           log("Back to IDLE");
           break;
         }
         if (d.incident_id && d.incident_id !== view.incidentId) {
+          companion.stop();
           convo.forIncident(d.incident_id);
           view = blank();
           view.incidentId = d.incident_id;
@@ -532,15 +536,18 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”",
           d.question ? "question, answered by text" : d.spoken ? "read aloud as one calm sentence" : "read aloud from a fixed template");
         log("Caregiver " + d.sender + ": “" + d.text + "”" + (d.question ? " (question, answered by text)" : d.spoken ? " (read aloud)" : ""));
+        if (d.spoken) companion.tell(`Caregiver message, already read aloud to her: "${d.spoken}"`);
         break;
       case "responder_update":
         for (const k of Object.keys(view.responders)) if (d.assigned) view.responders[k].assigned = false;
         view.responders[d.number] = d;
         log((d.name || d.number) + ": " + RESPONDER_TEXT[d.status] + (d.eta_min != null ? " · ETA " + d.eta_min + " min" : "") + (d.via === "call" ? " (said on the call)" : ""));
+        companion.tell(`${d.name || "A caregiver"} is ${RESPONDER_TEXT[d.status]}${d.eta_min != null ? ", ETA " + d.eta_min + " minutes" : ""}. She has already been told.`);
         break;
       case "call_update":
         view.calls = "Voice call " + d.status + (d.name ? " · " + d.name : "") + (d.reason ? " · " + d.reason : "") + (d.stub ? " (stub)" : "");
         log(view.calls + (d.summary ? ": " + d.summary : ""));
+        if (d.status === "completed" && d.summary) companion.tell("A phone call with a caregiver just ended. Summary: " + d.summary);
         break;
       case "unlock_attempt":
         if (d.allowed) unlockFailed = false;
@@ -549,6 +556,10 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         break;
       case "voice_line":
         convo.voiceLine(d);
+        companion.duck(d.state === "playing");  // the box's own voice never talks over the agent
+        break;
+      case "script_done":
+        companion.start(d.incident_id);
         break;
       case "question_played":
         pi.onQuestionPlayed(d);
@@ -557,7 +568,10 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         pi.onHeard(d);
         break;
       case "device_status":
-        if (d.event === "local_unlock") { localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false; }
+        if (d.event === "local_unlock") {
+          localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false;
+          companion.tell("The front door has just been unlocked for the caregiver. Help is arriving.");
+        }
         if (d.event === "unlock_failed") unlockFailed = true;
         log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
         break;
@@ -694,7 +708,8 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     }
 
     function onView() {
-      if (view.state === "IDLE" || !active()) closeMic();
+      // After the script the companion agent owns the mic.
+      if (view.state === "IDLE" || !active() || !view.asking) closeMic();
       else openMic().catch(() => {});
     }
 
@@ -790,6 +805,64 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     if (!window.MediaRecorder || !navigator.mediaDevices) box.disabled = true;
     box.addEventListener("change", onView);
     return { setAvailable, onView, onQuestionPlayed, onHeard, active };
+  })();
+
+  // --- Companion (ElevenLabs Agents) -----------------------------------------
+  // After the fixed script, an ElevenLabs agent talks with her through this Mac (AirPods).
+  // The backend mints a short-lived token, so the API key never reaches the page. Its two
+  // client tools call laptop-only routes: read incident facts (never the door code), and
+  // text the caregiver something she said that the agent judges important. Caregiver news
+  // arrives as contextual updates. It has no way to unlock anything.
+
+  const companion = (() => {
+    const SDK = "https://esm.sh/@elevenlabs/client@1.28.0";
+    let conv = null, starting = false;
+    const json = async (r) => JSON.stringify(await r.json());
+
+    async function start(incidentId) {
+      if (conv || starting || !incidentId) return;
+      starting = true;
+      try {
+        const r = await fetch(backend + "/companion/session");
+        if (!r.ok) throw new Error("backend said " + r.status);
+        const j = await r.json();
+        if (!j.enabled) { log("Companion agent off (needs ELEVENLABS_COMPANION_AGENT_ID and STUB_ELEVENLABS=0)"); return; }
+        const { Conversation } = await import(SDK);
+        if (view.incidentId !== incidentId || view.state === "IDLE") return;
+        conv = await Conversation.startSession({
+          conversationToken: j.token,
+          connectionType: "webrtc",
+          dynamicVariables: j.variables,
+          clientTools: {
+            get_incident_facts: async () => json(await fetch(backend + "/companion/facts")),
+            relay_to_caregiver: async (p) => {
+              const body = { message: String((p && p.message) || ""), urgency: p && p.urgency === "urgent" ? "urgent" : "normal" };
+              const res = await json(await fetch(backend + "/companion/relay", {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+              log("Companion relayed to caregiver (" + body.urgency + "): “" + body.message + "” → " + res);
+              return res;
+            },
+          },
+          onMessage: (msg) => {
+            const user = msg.source === "user";
+            convo.row(user ? "person" : "voice", user ? "Margaret → companion" : "Companion agent").set(msg.message || "");
+          },
+          onDisconnect: () => { conv = null; log("Companion agent disconnected"); },
+          onError: (e) => log("Companion agent error: " + (e && e.message ? e.message : e)),
+        });
+        if (view.incidentId !== incidentId || view.state === "IDLE") { stop(); return; }
+        log("Companion agent connected");
+      } catch (e) {
+        log("Companion agent didn't start (" + e.message + ")");
+      } finally { starting = false; }
+    }
+    function stop() {
+      const c = conv; conv = null;
+      if (c) c.endSession().catch(() => {});
+    }
+    function tell(text) { if (conv) try { conv.sendContextualUpdate(text); } catch (e) { /* session closing */ } }
+    function duck(on) { if (conv) Promise.resolve(conv.setVolume({ volume: on ? 0 : 1 })).catch(() => {}); }
+    return { start, stop, tell, duck };
   })();
 
   // --- speech input (Web Speech API, IMPLEMENTATION.md 7 Phase 1 step 6) ------

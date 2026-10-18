@@ -134,7 +134,7 @@ def test_caregiver_message_is_read_aloud(client):
     escalate(client)
     r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "Hang in there, I love you"}).json()
     assert r == {"type": "message", "accepted": True}
-    assert client.app.state.spoken[-1] == "Hang in there, I love you"
+    assert client.app.state.spoken[-2] == "Hang in there, I love you"
     assert client.get("/incident").json()["state"] == "RESPONDING"
     assert signed_poll(client).json() == {"commands": []}
 

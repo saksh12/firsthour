@@ -75,7 +75,7 @@ def test_silence_places_stub_call_then_webhook_carries_eta_back(client):
     raw = postcall(conv, ["yes", "I'll be there in 5 minutes"])
     r = client.post("/voice/postcall", content=raw, headers={"ElevenLabs-Signature": sign(raw)})
     assert r.status_code == 200 and r.json()["status"] == "arriving"
-    assert client.app.state.spoken[-1] == "Sarah is about 5 minutes away."
+    assert client.app.state.spoken[-2] == "Sarah is about 5 minutes away."
     texts = client.get("/comms/stub/outbox").json()["messages"]
     assert texts[-1]["to"] == [CAREGIVER] and texts[-1]["text"].startswith("You said 5 minutes on the call.")
     assert client.get("/incident").json()["state"] == "RESPONDING"
