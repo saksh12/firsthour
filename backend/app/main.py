@@ -6,6 +6,7 @@ TODO(phase 1, C): voice.py replaces `speak`.
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import threading
@@ -20,12 +21,12 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import make_command, verify_event, verify_poll
+from .security import ReplayCache, make_command, verify_event, verify_inbound, verify_poll
 from .telemetry import Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
@@ -122,6 +123,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
+    inbound_replays = ReplayCache()
 
     telemetry = Telemetry.init(s.get("SENTRY_DSN", ""), transport=s.get("SENTRY_TRANSPORT"))
 
@@ -277,6 +279,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
     app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
+    app.state.inbound_replays = inbound_replays
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
@@ -298,7 +301,11 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         if not ok:
             log.warning("edge event rejected reason=%s", reason)
             raise HTTPException(status_code=401, detail=reason)
-        event = EdgeEvent.model_validate_json(raw)
+        try:
+            event = EdgeEvent.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("edge event rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed event")
         last_heartbeat[event.device_id] = time.time()
         if event.type != "heartbeat":
             log.info("edge event type=%s device_id=%s local_incident_id=%s",
@@ -341,26 +348,54 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         return machine.snapshot()
 
     @app.post("/comms/inbound")
-    def comms_inbound(msg: InboundMessage, request: Request):
-        """Caregiver reply from Photon or the simulator page (same endpoint).
+    async def comms_inbound(request: Request):
+        """Caregiver reply from the comms-gateway or the simulator page (same endpoint).
 
-        With real Photon only the gateway may post here, because the sender number is
-        what the allowlist trusts. In stub mode the simulator page is the caregiver."""
-        if s["STUB_PHOTON"]:
+        The gateway signs with X-Signature/X-Timestamp (section 6.6). The
+        dashboard and simulator pages are unsigned, which is only allowed
+        while STUB_PHOTON=1 and only from this laptop; a presented signature
+        is always checked.
+        """
+        raw = await request.body()
+        signature = request.headers.get("X-Signature")
+        if signature is None:
+            if not s["STUB_PHOTON"]:
+                log.warning("inbound rejected reason=missing signature")
+                raise HTTPException(status_code=401, detail="missing signature")
             laptop_only(request)  # the simulator page is the caregiver's phone
         else:
-            auth = request.headers.get("Authorization", "")
-            if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
-                log.warning("comms inbound rejected: not from the gateway")
-                raise HTTPException(status_code=401, detail="gateway token required")
-            pending = undelivered.pop(msg.sender.strip(), None)
-            if pending and pending[0] == current_incident_id():
-                # ponytail: resends the card as first written (its "Down" time is stale);
-                # rebuild it here if the gap ever gets long.
-                log.info("resending alert now that the caregiver texted incident_id=%s to=%s",
-                         pending[0], msg.sender)
-                threading.Thread(target=deliver, args=(pending[0], [msg.sender.strip()], pending[1]),
-                                 daemon=True).start()
+            ok, reason = verify_inbound(secret, raw, signature,
+                                        request.headers.get("X-Timestamp"))
+            if not ok:
+                log.warning("inbound rejected reason=%s", reason)
+                raise HTTPException(status_code=401, detail=reason)
+            # A captured signed reply stays valid inside the freshness window, so
+            # dedupe: the signature covers the whole body, and the gateway's
+            # messageId catches a re-signed copy of the same Photon message.
+            keys = [signature]
+            try:
+                message_id = json.loads(raw).get("messageId")
+            except ValueError:
+                message_id = None
+            if message_id:
+                keys.append(f"mid:{message_id}")
+            now_ms = time.time() * 1000
+            if any(inbound_replays.is_replay(k, now_ms) for k in keys):
+                log.warning("inbound rejected reason=replay")
+                raise HTTPException(status_code=409, detail="replay")
+        try:
+            msg = InboundMessage.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("inbound rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed inbound message")
+        pending = undelivered.pop(msg.sender.strip(), None)
+        if pending and pending[0] == current_incident_id():
+            # ponytail: resends the card as first written (its "Down" time is stale);
+            # rebuild it here if the gap ever gets long.
+            log.info("resending alert now that the caregiver texted incident_id=%s to=%s",
+                     pending[0], msg.sender)
+            threading.Thread(target=deliver, args=(pending[0], [msg.sender.strip()], pending[1]),
+                             daemon=True).start()
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")

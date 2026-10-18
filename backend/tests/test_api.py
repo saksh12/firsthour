@@ -160,7 +160,10 @@ def test_real_photon_inbound_only_trusts_the_gateway():
     msg = {"sender": CAREGIVER, "text": "on my way"}
     assert c.post("/comms/inbound", json=msg).status_code == 401
     assert c.post("/comms/inbound", json=msg, headers={"Authorization": "Bearer nope"}).status_code == 401
-    ok = c.post("/comms/inbound", json=msg, headers={"Authorization": f"Bearer {SECRET}"})
+    ts = int(time.time() * 1000)
+    body = json.dumps(msg).encode()
+    ok = c.post("/comms/inbound", content=body,
+                headers={"X-Timestamp": str(ts), "X-Signature": sign_event(SECRET, ts, body)})
     assert ok.status_code == 200 and ok.json()["reason"] == "no active incident"
 
 
@@ -212,8 +215,10 @@ def test_alert_blocked_by_shared_line_is_sent_once_the_caregiver_texts(monkeypat
         pytest.fail("no undelivered alert event")
 
     attempt.clear()
-    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "hi, what happened?"},
-           headers={"Authorization": f"Bearer {SECRET}"})
+    body = json.dumps({"sender": CAREGIVER, "text": "hi, what happened?"}).encode()
+    ts = int(time.time() * 1000)
+    c.post("/comms/inbound", content=body,
+           headers={"X-Timestamp": str(ts), "X-Signature": sign_event(SECRET, ts, body)})
     assert attempt.wait(2)
     assert sent[1]["to"] == CAREGIVER and sent[1]["body"] == sent[0]["body"]
 

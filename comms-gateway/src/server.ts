@@ -13,6 +13,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import type { Config } from "./config.js";
 import { conversationOf, isCaregiverReply, toBackendInbound, type InboundForward } from "./messages.js";
 import { NoConversationError, type PhotonGateway } from "./photon.js";
+import { signHeaders } from "./sign.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -26,12 +27,18 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
-/** Forward one caregiver reply to the backend. Returns the backend's JSON. */
+/** Forward one caregiver reply to the backend, signed (section 6.6).
+ *  Unsigned when the secret is unset: the backend only accepts that while its
+ *  STUB_PHOTON=1 (the simulator path); index.ts warns. Returns the backend's JSON. */
 export async function forwardInbound(cfg: Config, payload: InboundForward): Promise<unknown> {
+  const body = JSON.stringify(payload);
   const resp = await fetch(`${cfg.backendUrl.replace(/\/$/, "")}/comms/inbound`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.backendToken}` },
-    body: JSON.stringify(payload),
+    headers: {
+      "content-type": "application/json",
+      ...(cfg.sharedSecret ? signHeaders(cfg.sharedSecret, body) : {}),
+    },
+    body,
   });
   if (!resp.ok) throw new Error(`backend /comms/inbound -> ${resp.status}`);
   return resp.json().catch(() => ({}));
