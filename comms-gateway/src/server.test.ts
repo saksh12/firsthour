@@ -28,6 +28,21 @@ function reply(id: string, text: string, createdAt: string): ReceivedMessage {
 }
 
 describe("inbound poll", () => {
+  it("forwards a reply that landed on a shared line other than PHOTON_AGENT_HANDLE", async () => {
+    const m = reply("m1", "on my way", new Date(Date.now() + 1000).toISOString());
+    m.receivedBy = { platform: "imessage", kind: "agent", handle: "+16282634622", id: "u_agent_2" };
+    const remembered: Array<[string, unknown]> = [];
+    const gateway = {
+      listReceivedSince: async () => [m],
+      remember: (h: string, c: unknown) => void remembered.push([h, c]),
+    };
+    const forwarded: InboundForward[] = [];
+    await createInboundPoll(cfg, gateway, async (_c, p) => void forwarded.push(p))();
+    expect(forwarded.map((p) => p.sender)).toEqual([CAREGIVER]);
+    // and the reply goes back on that same line, not the configured one
+    expect(remembered).toEqual([[CAREGIVER, { spaceId: "space_1", senderId: "u_agent_2" }]]);
+  });
+
   it("retries a reply whose forward failed, and doesn't skip past it", async () => {
     const at = (ms: number) => new Date(Date.now() + ms).toISOString();
     const inbox = [reply("m1", "UNLOCK 4821", at(1000)), reply("m2", "on my way", at(2000))];

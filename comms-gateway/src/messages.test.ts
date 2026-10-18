@@ -52,22 +52,32 @@ describe("extractPlainText", () => {
 
 describe("isCaregiverReply", () => {
   it("accepts a received plain-text human->agent iMessage", () => {
-    expect(isCaregiverReply(received(), AGENT)).toBe(true);
+    expect(isCaregiverReply(received())).toBe(true);
   });
-  it("rejects a message to a different agent handle", () => {
-    expect(isCaregiverReply(received(), "+19999999999")).toBe(false);
+  it("accepts a reply on a shared line other than the configured one", () => {
+    // Photon assigns shared lines per caregiver; the line in .env is only what they were told to text.
+    const m = received({
+      receivedBy: { platform: "imessage", kind: "agent", handle: "+16282634622", id: "u_agent_2" },
+    });
+    expect(isCaregiverReply(m)).toBe(true);
+  });
+  it("rejects a message received by a human (not one of our lines)", () => {
+    const m = received({
+      receivedBy: { platform: "imessage", kind: "human", handle: "+19999999999", id: "u_other" },
+    });
+    expect(isCaregiverReply(m)).toBe(false);
   });
   it("rejects our own outbound (agent sender)", () => {
     const m = received({
       sentBy: { platform: "imessage", kind: "agent", handle: AGENT, id: "u_agent" },
     });
-    expect(isCaregiverReply(m, AGENT)).toBe(false);
+    expect(isCaregiverReply(m)).toBe(false);
   });
   it("rejects non-received status", () => {
-    expect(isCaregiverReply(received({ status: "sent" }), AGENT)).toBe(false);
+    expect(isCaregiverReply(received({ status: "sent" }))).toBe(false);
   });
   it("rejects a non-text message", () => {
-    expect(isCaregiverReply(received({ content: { type: "image" } }), AGENT)).toBe(false);
+    expect(isCaregiverReply(received({ content: { type: "image" } }))).toBe(false);
   });
 });
 

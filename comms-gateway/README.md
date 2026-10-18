@@ -56,6 +56,12 @@ sent into it. Ask the table whether a **dedicated line** lets us text first.
 
 Inbound replies **do** carry the sender's number (`sentBy.handle`, E.164).
 
+On a shared plan Photon assigns each caregiver a shared line when they first text, and it is
+not always the number the console shows (Oct 18: `.env` said `+1...8199`, every reply landed
+on `+1...4622`). The poller therefore accepts replies to **any** of the project's agent lines
+and answers on the line the caregiver used; `PHOTON_AGENT_HANDLE` is only the number you tell
+caregivers to text. A reply on another line logs one `[poller] reply received on line ...` warning.
+
 ## Tests
 
 ```bash
