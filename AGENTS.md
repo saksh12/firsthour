@@ -26,12 +26,13 @@ Every sponsor below has a real job in the pipeline. If a change would break one 
 | --- | --- | --- |
 | **Main track**: Beyond the Digital | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, simulated door latch |
 | **QNX** | Product runs on **QNX OS** and includes **one open-source AI module from `oss.qnx.com`** | `edge/` on the Pi. Module: **`whisper.cpp`** from `repo.oss.qnx.com` (`apk add whisper.cpp`, model `ggml-base.en`) transcribes the person's spoken answers on the Pi (`IMPLEMENTATION.md` 6.8). **Gate 1 at 7:00 PM Sat**: if QNX isn't booting and reading serial, run `edge/` on Linux and drop this prize |
+| **Espressif**: Best Use of Espressif | Build with Espressif hardware (confirm the exact rule on the tracks page) | `arduino/hub/hub.ino` on the ESP32-S3-BOX-3: ICM-42607-P IMU, ES7210 mics in a FreeRTOS I2S task, ES8311 speaker alarm, LovyanGFX LCD, simulated latch with auto relock, the serial protocol. Write-up in `docs/espressif.md` |
 | **StepFun**: Get It Done with Step 5 Preview | App **must call `step-5-preview` at runtime**. Explain what every other model does. Judged on task completion, reliability, user understanding and control | Turns spoken answers into the triage record, writes the handoff summary, rewrites caregiver replies into one calm sentence |
 | **Photon**: Messaging/Calling Agent | Build on **Photon 2.0 beta** | `comms-gateway/`: alert text out, caregiver reply in. Voice calls only if confirmed available (`TODO(verify)`) |
 | **Sentry**: Best Use of Sentry | **≥2 products beyond error monitoring**, and show how they shaped the build | Tracing (one trace per incident), Uptime Monitoring (`/health` via tunnel), Logs (unlock audit trail), Session Replay optional |
 | **MLH**: Best Use of ElevenLabs | Use ElevenLabs | TTS for every fixed phrase (pre-cached); an Agents voice call to a silent caregiver; after the fixed script, a companion agent that talks with the person and decides what to relay to the caregiver (IMPLEMENTATION.md 6.9) |
-| **Paper** *or* **Base44** (pick one) | Paper: design craft. Base44: real problem, usable product | `dashboard/`. Decide by 3:00 PM Sat, do not chase both |
-| **Cognition**: Best Use of Devin (optional) | Build with Devin | Only claim it if Devin actually built something; note what |
+| **Paper** *or* **Base44** (pick one) | Paper: design craft. Base44: real problem, usable product | Skipped (decided Sun). Not entered |
+| **Cognition**: Best Use of Devin (optional) | Build with Devin | Not entered |
 
 Read each sponsor's "View Additional Information" page for extra rules or forms. Requirements can change.
 

@@ -53,8 +53,8 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | `scripts/demo_reset.sh` | One-command reset between runs | ✅ live | Backend to IDLE + signed `reset` to the Pi (latch locked, alarm off, `READY`) |
 | Calibration | Thresholds from ~20 trials per action | 🔶 Provisional | 19 bottle drops recorded on the BOX-3 (`edge/calibrate.py`); demo values live only in the Pi's `.env`. Non-fall trials and repo defaults still to do |
 | Handoff sheet page | Paramedic summary | ⬜ | |
-| Docs | `docs/sentry-story.md` started; demo script and Devpost draft in PR #31 | 🔶 | |
-| Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
+| Docs | `docs/devpost-draft.md`, `docs/demo-script.md`, `docs/espressif.md`, `docs/prize-admin.md`, `docs/sentry-story.md` | 🔶 | Human-only prize steps are in `docs/prize-admin.md` |
+| Paper or Base44 | Pick one sponsor for the dashboard | Skipped | Decided Sun: neither is entered |
 
 Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **463 passed** (Oct 18, #38).
 
@@ -62,7 +62,7 @@ Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **463 p
 
 - Real Photon text out and reply in; the backend placing the escalation call (#23, PR #36).
 - Non-fall checks and full calibration; unplugging Wi-Fi for M5; an all-silent Pi speech run.
-- Sentry uptime monitor on the tunnel; handoff sheet page; Paper or Base44.
+- Sentry uptime monitor on the tunnel; handoff sheet page; the prize admin steps in `docs/prize-admin.md`.
 - Rotate `PHOTON_SIP_OUTBOUND_PASSWORD`.
 
 ### Decided
