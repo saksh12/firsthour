@@ -46,6 +46,13 @@ def alerted(m):
     assert m.state == S.ALERTING and m.incident.question_index == 1
 
 
+def finished(m):
+    alerted(m)
+    for a in ["no", "my hip", "yes", "no"]:
+        m.on_answer(a)
+    m.line_played(CLOSING_LINE)
+
+
 def test_missed_answer_after_the_alert_is_asked_again_then_skipped(m, clock, rec):
     alerted(m)
     m.line_played(QUESTIONS[1][1])
@@ -103,13 +110,18 @@ def test_finished_script_closes_and_hands_over_once(m, rec):
     for a in ["no", "my hip", "yes", "no"]:
         m.on_answer(a)
     assert rec.spoken[-1] == CLOSING_LINE
+    assert not m.snapshot()["companion_ready"]
+    assert not any(t == "script_done" for t, _ in rec.events)
+    m.line_played(CLOSING_LINE)
+    m.line_played(CLOSING_LINE)
+    assert m.snapshot()["companion_ready"]
     assert [d for t, d in rec.events if t == "script_done"] == [{"incident_id": "inc-1"}]
     m.caregiver_reply(CAREGIVER, "on my way")
     assert rec.spoken[-1] != CLOSING_LINE and rec.spoken.count(CLOSING_LINE) == 1
 
 
 def test_relay_goes_to_everyone_until_someone_claims(m, rec):
-    alerted(m)
+    finished(m)
     assert m.companion_relay("my hip really hurts now", "urgent")["sent"]
     to, text, kind = rec.texts[-1]
     assert to == sorted([CAREGIVER, OTHER]) and kind == "relay"
@@ -124,6 +136,11 @@ def test_relay_is_bounded_and_never_carries_the_code(m, rec):
     m.on_fall("bath-01", "inc-1")
     assert not m.companion_relay("hello")["sent"]  # still checking: no alert yet
     m.on_answer("help")
+    assert not m.companion_relay("hello")["sent"]  # remaining questions still pending
+    for a in ["no", "my hip", "yes", "no"]:
+        m.on_answer(a)
+    assert not m.companion_relay("hello")["sent"]  # closing audio still pending
+    m.line_played(CLOSING_LINE)
     assert m.companion_relay(f"the code is {m.incident.code}") == {"sent": False, "reason": "refused"}
     assert not m.companion_relay("   ")["sent"]
     for _ in range(RELAY_MAX):
@@ -145,7 +162,7 @@ def test_companion_is_off_unless_configured():
     assert c.get("/companion/session").json() == {"enabled": False}
 
 
-def test_companion_session_mints_a_token_only_for_an_alerted_incident(monkeypatch):
+def test_companion_session_waits_for_all_questions_and_closing_audio(monkeypatch):
     seen = []
     monkeypatch.setattr(main_mod, "companion_token", lambda key, agent, base: seen.append(agent) or "tok")
     c = app_client(STUB_ELEVENLABS=False, ELEVENLABS_COMPANION_AGENT_ID="agent_x", ELEVENLABS_API_KEY="k")
@@ -153,6 +170,14 @@ def test_companion_session_mints_a_token_only_for_an_alerted_incident(monkeypatc
     c.app.state.machine.on_fall("bath-01", "inc-1")
     assert c.get("/companion/session").status_code == 409  # still the fixed check
     c.app.state.machine.on_answer("help")
+    assert c.get("/companion/session").status_code == 409
+    # Hold the playback callback to check the gap between the fifth answer and closing audio.
+    c.app.state.machine._speak = lambda text: None
+    for a in ["no", "my hip", "yes", "no"]:
+        c.app.state.machine.on_answer(a)
+    assert c.get("/companion/session").status_code == 409
+    assert seen == []
+    c.app.state.machine.line_played(CLOSING_LINE)
     body = c.get("/companion/session").json()
     assert body == {"enabled": True, "token": "tok", "variables": {"patient_name": "Margaret", "room": "Bathroom"}}
     assert seen == ["agent_x"]
@@ -165,6 +190,8 @@ def test_companion_tools_are_laptop_only_and_code_free():
     machine.on_answer("help")
     facts = c.get("/companion/facts").json()
     assert facts["active"] and machine.incident.code not in str(facts)
+    for a in ["no", "my hip", "yes", "no"]:
+        machine.on_answer(a)
     r = c.post("/companion/relay", json={"message": "my hip hurts", "urgency": "normal"})
     assert r.json()["sent"]
     assert c.post("/companion/relay", json={"message": "x", "urgency": "panic"}).status_code == 422
@@ -182,3 +209,12 @@ def test_finishing_the_script_through_the_app_reaches_the_dashboard():
         assert c.post("/person/answer", json={"text": a}).status_code == 200
     assert any(e.type == "script_done" for e in c.app.state.events)
     assert c.app.state.spoken[-1] == CLOSING_LINE
+
+
+def test_late_closing_audio_cannot_start_a_companion_for_a_new_incident(m, rec):
+    finished(m)
+    m.resolve("operator")
+    m.on_fall("bath-01", "inc-2")
+    m.line_played(CLOSING_LINE)
+    assert not m.snapshot()["companion_ready"]
+    assert [d["incident_id"] for t, d in rec.events if t == "script_done"] == ["inc-1"]

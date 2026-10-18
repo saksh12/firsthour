@@ -342,6 +342,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         **({"transport": s["CALLS_TRANSPORT"]} if "CALLS_TRANSPORT" in s else {}),  # tests only
     )
     log.info("voice calls: %s", "ElevenLabs over SIP" if calls.real else "stub (logged only)")
+    companion_enabled = bool(not s.get("STUB_ELEVENLABS", True)
+                             and s.get("ELEVENLABS_API_KEY") and s.get("ELEVENLABS_COMPANION_AGENT_ID"))
+    log.info("companion: %s", "configured, waiting for script completion" if companion_enabled else "disabled")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
                               playback_grace_s=PLAYBACK_GRACE_S,
                               emit=emit, on_close=on_close, speak=speak,
@@ -630,11 +633,13 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     @app.get("/companion/session", dependencies=[Depends(laptop_only)])
     def companion_session():
         agent = s.get("ELEVENLABS_COMPANION_AGENT_ID", "")
-        if s.get("STUB_ELEVENLABS", True) or not agent or not s.get("ELEVENLABS_API_KEY"):
+        if not companion_enabled:
             return {"enabled": False}
         facts = machine.facts()
         if not facts or facts["state"] == "CHECKING":
             raise HTTPException(status_code=409, detail="no alerted incident")
+        if not machine.snapshot().get("companion_ready"):
+            raise HTTPException(status_code=409, detail="fixed questions still finishing")
         try:
             token = companion_token(s["ELEVENLABS_API_KEY"], agent, s.get("ELEVENLABS_BASE_URL", ""))
         except Exception as e:

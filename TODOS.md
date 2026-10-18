@@ -50,6 +50,8 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Phase 3: Real integrations (7:00 to 10:30 PM)
 
+- [x] (C/D · Droid) Enable the post-script companion and refine both saved agent prompts (`docs/voice-prompts.md`). Verified: 432 backend tests, 7 frontend tests, stub fall-to-unlock, browser off/retry state, SDK import, and private-agent token minting. Live backend restarted with companion enabled.
+- [ ] (C/D) Live AirPods companion and selective Photon relay after all five questions. Blocked at the latest check by absent Pi heartbeats; no real test call or text placed during companion enablement.
 - [ ] (A+B) `STUB_EDGE=0`: signed events + verified commands; wrong secret rejected
 - [ ] (B) `STUB_STEPFUN=0`, latency logged
 - [x] (C · Droid) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock: stock voice, 6 fixed phrases cached on the port-8002 test backend (`edge/box3-voice`); played live through three knock runs on the real Pi

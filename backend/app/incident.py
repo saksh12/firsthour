@@ -34,7 +34,7 @@ log = logging.getLogger("firsthour.incident")
 
 REASK_LINE = "Sorry, I didn't catch that."
 MAX_TRIES = 2  # asks per question after the alert; then it stays unknown and the script moves on
-CLOSING_LINE = "Thank you. That's all my questions. I've told your family, and I'm staying right here with you."
+CLOSING_LINE = "Thank you. That's all my questions."
 RELAY_MAX = 6  # companion relays per incident, so a looping agent can't flood the caregiver
 RELAY_MAX_CHARS = 300
 
@@ -61,6 +61,7 @@ class Incident:
     code: str = field(default="", repr=False)  # texted only to a caregiver who commits; never in snapshot/facts
     misses: int = 0  # unanswered asks of the current question (after the alert)
     script_done: bool = False
+    companion_ready: bool = False
     relays: int = 0
 
 
@@ -163,6 +164,7 @@ class IncidentMachine:
             "down_s": round(self._clock() - inc.opened_at, 1),
             "current_question": self._current_question(),
             "question_index": inc.question_index,
+            "companion_ready": inc.companion_ready,
             "transcript": [{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
             "answered": _answered(inc),
             "triage": inc.triage.model_dump(),
@@ -385,6 +387,10 @@ class IncidentMachine:
         """The voice finished playing `text`. Starts the silence timer for the current question."""
         with self._lock:
             inc = self.incident
+            if inc and inc.script_done and text == CLOSING_LINE and not inc.companion_ready:
+                inc.companion_ready = True
+                self._emit("script_done", {"incident_id": inc.id})
+                return
             if not inc or text != self._current_question():
                 return
             if self._question_heard_at is None:
@@ -473,8 +479,7 @@ class IncidentMachine:
         inc.script_done = True
         self._speak(CLOSING_LINE)
         log.info("question script finished incident_id=%s", inc.id)
-        # The dashboard hands her side of the conversation to the companion agent, if configured.
-        self._emit("script_done", {"incident_id": inc.id})
+        # line_played hands over after the closing audio, not while it is still speaking.
 
     def companion_relay(self, message: str, urgency: str = "normal") -> dict:
         """The companion agent judged something she said worth texting: to whoever claimed the
@@ -484,6 +489,8 @@ class IncidentMachine:
             inc = self.incident
             if not inc or inc.state == S.CHECKING:
                 return {"sent": False, "reason": "no alerted incident"}
+            if not inc.companion_ready:
+                return {"sent": False, "reason": "fixed questions still finishing"}
             if not message:
                 return {"sent": False, "reason": "empty message"}
             if inc.code and inc.code in message:

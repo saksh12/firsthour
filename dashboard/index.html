@@ -183,6 +183,10 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   <section class="grid">
     <div class="panel full">
       <p class="label">Conversation (live)</p>
+      <div class="op-row">
+        <span id="companion-status" role="status" aria-live="polite">Companion waits until the five questions finish.</span>
+        <button class="ghost" id="companion-retry" type="button" hidden>Retry companion</button>
+      </div>
       <ul class="convo" id="convo"><li class="empty">Nothing yet. Lines appear as they play in her earbuds and as the Pi transcribes her answers.</li></ul>
     </div>
 
@@ -276,7 +280,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
 
   function blank() {
     return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null,
-             responders: {}, delivery: "", calls: "" };
+             responders: {}, delivery: "", calls: "", companionReady: false };
   }
 
   // --- rendering -----------------------------------------------------------
@@ -475,6 +479,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   // --- events (section 6.7) --------------------------------------------------
 
   function onSnapshot(d) {
+    if (d.incident_id !== view.incidentId || d.state === "IDLE") companion.stop();
     view = blank();
     view.state = d.state;
     view.incidentId = d.incident_id;
@@ -484,11 +489,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       view.answered = d.answered || [];
       view.triage = d.triage || null;
       view.asking = d.current_question || null;
+      view.companionReady = !!d.companion_ready;
       for (const r of d.responders || []) view.responders[r.number] = r;
     }
     pi.setAvailable(!!d.pi_stt);
     // Page reloaded after the script finished: pick the companion back up.
-    if (d.incident_id && d.state !== "CHECKING" && !d.current_question) companion.start(d.incident_id);
+    if (view.companionReady) companion.start(d.incident_id);
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
   }
 
@@ -559,6 +565,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         companion.duck(d.state === "playing");  // the box's own voice never talks over the agent
         break;
       case "script_done":
+        view.companionReady = true;
         companion.start(d.incident_id);
         break;
       case "question_played":
@@ -570,7 +577,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       case "device_status":
         if (d.event === "local_unlock") {
           localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false;
-          companion.tell("The front door has just been unlocked for the caregiver. Help is arriving.");
+          companion.tell("The device confirmed the door unlocked. This does not confirm that anyone has arrived.");
         }
         if (d.event === "unlock_failed") unlockFailed = true;
         log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
@@ -598,6 +605,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       } catch (e) { console.warn("bad event", e); }
     };
     ws.onclose = () => {
+      companion.stop("Backend disconnected. Companion is not listening.", true);
       $("conn").classList.remove("live");
       $("conn-text").textContent = "Reconnecting…";
       setTimeout(connect, retry);
@@ -816,52 +824,86 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
 
   const companion = (() => {
     const SDK = "https://esm.sh/@elevenlabs/client@1.28.0";
-    let conv = null, starting = false;
-    const json = async (r) => JSON.stringify(await r.json());
+    let conv = null, starting = false, generation = 0, ducked = false;
+    const status = $("companion-status"), retryButton = $("companion-retry");
+    function show(text, retry = false) {
+      status.textContent = text;
+      retryButton.hidden = !retry;
+      log(text);
+    }
+    async function json(r) {
+      if (!r.ok) throw new Error("backend said " + r.status);
+      return JSON.stringify(await r.json());
+    }
+    retryButton.addEventListener("click", () => start(view.incidentId));
 
     async function start(incidentId) {
-      if (conv || starting || !incidentId) return;
+      if (conv || starting || !incidentId || !view.companionReady) return;
       starting = true;
+      const attempt = ++generation;
+      const current = () => attempt === generation && view.incidentId === incidentId && view.state !== "IDLE";
+      show("Connecting companion. Not listening yet.");
       try {
         const r = await fetch(backend + "/companion/session");
+        if (!current()) return;
         if (!r.ok) throw new Error("backend said " + r.status);
         const j = await r.json();
-        if (!j.enabled) { log("Companion agent off (needs ELEVENLABS_COMPANION_AGENT_ID and STUB_ELEVENLABS=0)"); return; }
+        if (!current()) return;
+        if (!j.enabled) {
+          show("Companion is off and is not listening. Check the agent ID and STUB_ELEVENLABS=0, then restart the backend.", true);
+          return;
+        }
         const { Conversation } = await import(SDK);
-        if (view.incidentId !== incidentId || view.state === "IDLE") return;
-        conv = await Conversation.startSession({
+        if (!current()) return;
+        const session = await Conversation.startSession({
           conversationToken: j.token,
           connectionType: "webrtc",
           dynamicVariables: j.variables,
           clientTools: {
-            get_incident_facts: async () => json(await fetch(backend + "/companion/facts")),
+            get_incident_facts: async () => current()
+              ? json(await fetch(backend + "/companion/facts")) : JSON.stringify({ active: false }),
             relay_to_caregiver: async (p) => {
+              if (!current()) return JSON.stringify({ sent: false, reason: "session ended" });
               const body = { message: String((p && p.message) || ""), urgency: p && p.urgency === "urgent" ? "urgent" : "normal" };
               const res = await json(await fetch(backend + "/companion/relay", {
                 method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
-              log("Companion relayed to caregiver (" + body.urgency + "): “" + body.message + "” → " + res);
+              log("Companion relay request result: " + res);
               return res;
             },
           },
           onMessage: (msg) => {
+            if (!current()) return;
             const user = msg.source === "user";
             convo.row(user ? "person" : "voice", user ? "Margaret → companion" : "Companion agent").set(msg.message || "");
           },
-          onDisconnect: () => { conv = null; log("Companion agent disconnected"); },
-          onError: (e) => log("Companion agent error: " + (e && e.message ? e.message : e)),
+          onDisconnect: () => {
+            if (!current()) return;
+            generation++; conv = null; starting = false;
+            show("Companion disconnected and is not listening. Retry to reconnect.", true);
+          },
+          onError: () => {
+            if (current()) stop("Companion connection failed. Not listening. Check microphone permission and retry.", true);
+          },
         });
-        if (view.incidentId !== incidentId || view.state === "IDLE") { stop(); return; }
-        log("Companion agent connected");
+        if (!current()) { await session.endSession(); return; }
+        conv = session;
+        duck(ducked);
+        show("Companion connected. Microphone is active.");
       } catch (e) {
-        log("Companion agent didn't start (" + e.message + ")");
-      } finally { starting = false; }
+        if (current()) show("Companion didn't start (" + e.message + "). Not listening. Check microphone permission and retry.", true);
+      } finally { if (attempt === generation) starting = false; }
     }
-    function stop() {
+    function stop(message = "Companion waits until the five questions finish.", retry = false) {
+      generation++; starting = false;
       const c = conv; conv = null;
       if (c) c.endSession().catch(() => {});
+      show(message, retry);
     }
     function tell(text) { if (conv) try { conv.sendContextualUpdate(text); } catch (e) { /* session closing */ } }
-    function duck(on) { if (conv) Promise.resolve(conv.setVolume({ volume: on ? 0 : 1 })).catch(() => {}); }
+    function duck(on) {
+      ducked = on;
+      if (conv) Promise.resolve(conv.setVolume({ volume: on ? 0 : 1 })).catch(() => {});
+    }
     return { start, stop, tell, duck };
   })();
 
