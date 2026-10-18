@@ -44,6 +44,29 @@ def sf(transport, **kw):
 
 # --- triage ------------------------------------------------------------------
 
+def test_rewrite_never_queues_behind_slow_triage_calls():
+    """#26: triage calls filling the pool made a caregiver reply fall back un-rewritten."""
+    import threading
+    release = threading.Event()
+
+    def transport(url, headers, body, timeout):
+        if body.get("response_format"):  # triage
+            release.wait(5)
+            return {"choices": [{"message": {"content": json.dumps(GOOD)}}]}
+        return {"choices": [{"message": {"content": "Sarah is on her way."}}]}
+
+    s = sf(transport, triage_timeout_s=5)
+    workers = [threading.Thread(target=s.triage, args=(ANSWERS, DEMO_PROFILE)) for _ in range(5)]
+    for w in workers:
+        w.start()
+    try:
+        assert s.rewrite("On my way") == "Sarah is on her way."
+    finally:
+        release.set()
+        for w in workers:
+            w.join()
+
+
 def test_good_model_output_is_used():
     rec = sf(FakeTransport(GOOD)).triage(ANSWERS, DEMO_PROFILE)
     assert rec.pain_location == "right hip" and rec.head_strike is False
