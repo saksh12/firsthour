@@ -25,7 +25,7 @@ Every sponsor below has a real job in the pipeline. If a change would break one 
 | Sponsor | Requirement to qualify | Our usage |
 | --- | --- | --- |
 | **Main track**: Beyond the Digital | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, simulated door latch |
-| **QNX** | Product runs on **QNX OS** and includes **one open-source AI module from `oss.qnx.com`** | `edge/` on the Pi. Module: `TODO(verify)` at the QNX table. **Gate 1 at 7:00 PM Sat**: if QNX isn't booting and reading serial, run `edge/` on Linux and drop this prize |
+| **QNX** | Product runs on **QNX OS** and includes **one open-source AI module from `oss.qnx.com`** | `edge/` on the Pi. Module: **`whisper.cpp`** from `repo.oss.qnx.com` (`apk add whisper.cpp`, model `ggml-base.en`) transcribes the person's spoken answers on the Pi (`IMPLEMENTATION.md` 6.8). **Gate 1 at 7:00 PM Sat**: if QNX isn't booting and reading serial, run `edge/` on Linux and drop this prize |
 | **StepFun**: Get It Done with Step 5 Preview | App **must call `step-5-preview` at runtime**. Explain what every other model does. Judged on task completion, reliability, user understanding and control | Turns spoken answers into the triage record, writes the handoff summary, rewrites caregiver replies into one calm sentence |
 | **Photon**: Messaging/Calling Agent | Build on **Photon 2.0 beta** | `comms-gateway/`: alert text out, caregiver reply in. Voice calls only if confirmed available (`TODO(verify)`) |
 | **Sentry**: Best Use of Sentry | **≥2 products beyond error monitoring**, and show how they shaped the build | Tracing (one trace per incident), Uptime Monitoring (`/health` via tunnel), Logs (unlock audit trail), Session Replay optional |
@@ -48,6 +48,7 @@ Nothing here is verified yet. Whoever confirms a fact replaces the `TODO(verify)
 - Photon: inbound replies **do** carry the sender's number (`sentBy.handle`). A **shared** line can't send the first message, so the caregiver texts the agent line once before the demo. Dedicated line and outbound calls: `TODO(verify)` at the Photon table.
 - StepFun base URL depends on the key: `https://api.stepfun.com/v1` or `https://api.stepfun.ai/v1`. **Never hardcode either.**
 - ElevenLabs voice cloning and realtime STT on our tier: `TODO(verify)`. Fallback is a stock voice and browser Web Speech API.
+- **Speech-to-text on the QNX Pi** (verified Oct 18): the `whisper.cpp` apk runs `whisper-cli` and `whisper-server` on the Pi 5. The Logitech Brio's USB mic fails in QNX `io-snd`, so the mic is on the laptop: the dashboard records the answer and the Pi fetches the clip (signed) and transcribes it. Use 3 whisper threads on the 4-core Pi, not 4 (measured 9.5 vs 272 ms per decoded token).
 
 ### No servo: the simulated latch
 
@@ -144,13 +145,14 @@ Grow a file before you split it. Do not add packages, layers or abstractions tha
 | --- | --- |
 | `device_id` | e.g. `bath-01` |
 | `ts` | epoch ms |
-| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Arduino answered `ACK,U`) \| `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`) \| `cancelled` |
+| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Arduino answered `ACK,U`) \| `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`) \| `cancelled` \| `speech_text` (transcript of a `transcribe` clip) |
 | `sensors` | `{sound_peak, accel_delta_g, dist_cm}` |
 | `local_incident_id` | `<device_id>-<ts>` |
+| `speech` | only on `speech_text`: `{clip_id, text, stt_ms, audio_ms, error}`; empty text or an error counts as no answer |
 
 Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
-**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01&ts=<ms>` every 1 s, header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id))`. A missing, bad, stale (> 10 s) or replayed (`ts` not newer than the last accepted poll) signature gets 401 and leaves the queue alone. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display` \| `reset` (demo reset: lock, alarm off, clear the fusion cooldown, `READY`; obeyed only with no local incident open; `incident_id` is `""`). `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
+**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01&ts=<ms>` every 1 s, header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id))`. A missing, bad, stale (> 10 s) or replayed (`ts` not newer than the last accepted poll) signature gets 401 and leaves the queue alone. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display` \| `reset` (demo reset: lock, alarm off, clear the fusion cooldown, `READY`; obeyed only with no local incident open; `incident_id` is `""`) \| `transcribe` (own open incident only: fetch `GET /edge/audio/<id>?device_id&ts`, signed `hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id + "." + clip_id))`, served once, then post `speech_text`). `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
 
 **Incident states**: `IDLE` → `CHECKING` → (`CANCELLED` on "I'm fine" | `ALERTING` on help or 8 s silence) → `RESPONDING` on any caregiver reply → `UNLOCKED` on accepted unlock → `RESOLVED` → `IDLE`.
 
@@ -158,7 +160,7 @@ Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
 **Caregiver reply grammar**: `UNLOCK <4 digits>` attempts an unlock. Anything else is a message, rewritten to one calm sentence (≤ 20 words) and read aloud.
 
-**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`.
+**Backend → dashboard** (WebSocket): `incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt {result, reason}`, `device_status`, `question_played`, `speech_heard`, `voice_line`.
 
 ## Unlock rules (non-negotiable; judges will poke at this)
 
@@ -192,7 +194,8 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 | --- | --- |
 | Thud → `TIME DOWN` on display | Local only, no network in path |
 | Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
-| StepFun triage call | Runs in the background after the instant rule-based record (which drives escalation and the alert). Hard timeout **15 s**, then the rule record stays. Measured 5-13 s on `low` |
+| Spoken answer → transcript on the Pi (`PI_STT=1`) | Off the sensor loop, whisper at lower QNX priority than the reader, 10 s timeout. Measured live with `base.en` and clips up to 8 s: whisper 2.7-3.1 s, clip upload to answer applied 3.8-4.3 s (`tiny.en`: 1.16-1.55 s and 1.6-2.4 s) |
+| StepFun triage call | Runs in the background after the instant rule-based record (which drives escalation and the alert). Hard timeout **45 s**, then the rule record stays. Measured 5-38 s on `low` (the lowest level); unclear answers reason longest, up to 3593 tokens, so `max_tokens` is 5000 |
 | StepFun reply rewrite | Hard timeout **3 s**, then the original text. Measured 1-1.8 s with the "answer immediately" prompt |
 | Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
@@ -203,10 +206,11 @@ One Sentry trace per incident, spans: `sensor_event` → `voice_check` → `spee
 
 - OpenAI-compatible `POST {STEPFUN_BASE_URL}/chat/completions` over stdlib `urllib` (no SDK dependency), model from `STEPFUN_MODEL` (default `step-5-preview`).
 - Every call asks for **strict JSON** (`response_format={"type": "json_object"}`, low temperature) and is validated with pydantic.
+- The model can add detail and worrying answers, never reassurance: a clear rule answer always wins, and where the rules found nothing only `head_strike=true`, `can_move=false` or `bleeding=true` is taken from the model. If any field is overridden, the templated summary replaces the model's (`merge_model` in `triage.py`). Measured Oct 18: the model read "not exactly" (bleeding) as "denies bleeding".
 - On timeout, bad JSON or validation failure: **fall back to rule-based keyword parsing** and a templated summary, and log it. The incident flow never waits on or crashes from the model.
 - Functions: `parse_answers(transcript, profile) → TriageRecord` · `rewrite_reply(text) → str (≤ 20 words, no added info)` · handoff summary.
 - StepFun **does not** diagnose, advise, or improvise questions. If you are tempted to let it, stop.
-- Check the StepFun docs for a low-reasoning-effort parameter before assuming one exists (`TODO(verify)`). Log latency on every call.
+- `reasoning_effort` accepts `low`, `medium` or `high` (StepFun docs, checked Oct 18); triage uses `low`, the lowest. Log latency on every call.
 - The dashboard shows the **raw transcript next to the record**, so users can see and correct what the AI understood.
 
 ## Safety and ethics rules (non-negotiable)

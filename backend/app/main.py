@@ -20,13 +20,13 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field, ValidationError
 
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import ReplayCache, make_command, verify_event, verify_inbound, verify_poll
+from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
 from .telemetry import Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
@@ -40,6 +40,9 @@ TICK_S = 0.25
 # starts anyway: the assistant line plus question 1, each up to a 4 s TTS fetch on a cold cache.
 PLAYBACK_GRACE_S = 12
 WS_QUEUE_MAX = 200
+# A recorded answer is 16 kHz mono 16-bit, a few seconds long: 32 KB per second.
+CLIP_MAX_BYTES = 16000 * 2 * 15
+CLIP_TTL_S = 60  # an unfetched clip is deleted after this; audio is never written to disk
 # Added by a tunnel (cloudflared, ngrok) or any proxy. The tunnel connects from 127.0.0.1,
 # so without this check the whole internet would look like the laptop.
 PROXY_HEADERS = ("forwarded", "x-forwarded-for", "cf-connecting-ip", "x-real-ip")
@@ -67,6 +70,10 @@ class PersonAnswer(BaseModel):
     text: str
 
 
+class PersonListening(BaseModel):
+    seconds: float = Field(gt=0, le=15)  # how long the dashboard records her answer
+
+
 def load_settings() -> dict:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     return {
@@ -89,7 +96,20 @@ def load_settings() -> dict:
         "ELEVENLABS_MODEL": os.getenv("ELEVENLABS_MODEL", ""),
         "ELEVENLABS_BASE_URL": os.getenv("ELEVENLABS_BASE_URL", ""),
         "VOICE_PLAYBACK": os.getenv("VOICE_PLAYBACK", "1") == "1",
+        "PI_STT": os.getenv("PI_STT", "0") == "1",
+        "PI_STT_HOLD_S": float(os.getenv("PI_STT_HOLD_SECONDS", "20")),
     }
+
+
+def wav_ms(raw: bytes) -> Optional[int]:
+    """Clip length if raw is a 16 kHz mono 16-bit PCM WAV (what whisper.cpp wants), else None."""
+    if len(raw) < 44 or raw[:4] != b"RIFF" or raw[8:16] != b"WAVEfmt ":
+        return None
+    fmt, channels = int.from_bytes(raw[20:22], "little"), int.from_bytes(raw[22:24], "little")
+    rate, bits = int.from_bytes(raw[24:28], "little"), int.from_bytes(raw[34:36], "little")
+    if (fmt, channels, rate, bits) != (1, 1, 16000, 16) or raw[36:40] != b"data":
+        return None
+    return int.from_bytes(raw[40:44], "little") * 1000 // (16000 * 2)
 
 
 def parse_origins(value: str) -> list[str]:
@@ -103,7 +123,8 @@ def parse_origins(value: str) -> list[str]:
 
 def create_app(settings: Optional[dict] = None) -> FastAPI:
     s = {"STUB_PHOTON": True, "UNLOCK_HOLD_SECONDS": 30, "CORS_ORIGINS": DEFAULT_CORS_ORIGINS,
-         "COMMS_GATEWAY_URL": "http://localhost:8787", **(settings or load_settings())}
+         "COMMS_GATEWAY_URL": "http://localhost:8787", "PI_STT": False, "PI_STT_HOLD_S": 20,
+         **(settings or load_settings())}
     origins = parse_origins(s["CORS_ORIGINS"])
     secret = s["SHARED_SECRET"]
     if not secret:
@@ -120,6 +141,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     # Live Photon on a shared line can't text a caregiver who hasn't texted it first (409).
     # Keep their alert and send it the moment they do.
     undelivered: dict[str, tuple[str, str]] = {}
+    # Recorded answers waiting for the Pi (clip id = its transcribe command id). Memory only.
+    clips: dict[str, dict] = {}
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
@@ -130,6 +153,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     def current_incident_id() -> Optional[str]:
         inc = machine.incident
         return inc.id if inc else None
+
+    def voice_line(text: str, state: str) -> None:
+        # The operator sees what the person hears, live. Shown, never logged (log.info uses a hash).
+        emit("voice_line", {"incident_id": current_incident_id(), "text": text, "state": state})
 
     def emit(type_: str, data: dict) -> None:
         ev = DashboardEvent(type=type_, data=data)
@@ -201,6 +228,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     def on_close(inc, final) -> None:
         voice.flush()  # leftover questions must not play after "I'm fine" or a resolve
         undelivered.clear()
+        for clip_id in [k for k, c in clips.items() if c["incident_id"] == inc.id]:
+            del clips[clip_id]  # the person's audio never outlives the incident
         close_on_pi(inc, final)
 
     def close_on_pi(inc, final) -> None:
@@ -230,7 +259,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
         base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,
         span=lambda **kw: telemetry.span(current_incident_id(), "voice", **kw),
-        on_played=lambda text: machine.line_played(text),
+        on_start=lambda text: voice_line(text, "playing"),
+        on_played=lambda text: (voice_line(text, "played"), machine.line_played(text)),
         **({"transport": s["VOICE_TRANSPORT"], "player": s["VOICE_PLAYER"]}
            if "VOICE_TRANSPORT" in s else {}),  # tests only
     )
@@ -322,9 +352,91 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             machine.on_help_button()
         elif event.type == "cancelled":
             machine.cancel("cancelled on device")
+        elif event.type == "speech_text" and event.speech:
+            on_speech(event)
         # local_unlock: the Pi opened the latch; we only log and show it.
         inc = machine.incident
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
+
+    def on_speech(event: EdgeEvent) -> None:
+        sp = event.speech
+        clip = clips.pop(sp.clip_id, None)
+        inc = machine.incident
+        if not clip or clip["device_id"] != event.device_id or not inc or inc.id != clip["incident_id"]:
+            log.info("speech_text for an unknown or finished clip dropped clip=%s", sp.clip_id)
+            return
+        round_trip_ms = int((time.time() - clip["uploaded_at"]) * 1000)
+        text = sp.text.strip()
+        # Never log the words: they are the person's answer. Latency and length only.
+        log.info("pi speech-to-text clip=%s incident_id=%s stt_ms=%s audio_ms=%s round_trip_ms=%d words=%d error=%s",
+                 sp.clip_id, inc.id, sp.stt_ms, sp.audio_ms, round_trip_ms, len(text.split()), sp.error)
+        telemetry.finish(inc.id, f"stt:{sp.clip_id}", stt_ms=sp.stt_ms, round_trip_ms=round_trip_ms,
+                         error=sp.error or "")
+        emit("speech_heard", {"incident_id": inc.id, "clip_id": sp.clip_id, "text": text,
+                              "stt_ms": sp.stt_ms, "audio_ms": sp.audio_ms, "round_trip_ms": round_trip_ms,
+                              "error": sp.error, "source": "whisper.cpp on the Pi"})
+        if not text or not machine.on_answer(text, question_index=clip["question_index"]):
+            machine.release_speech_hold()
+
+    @app.post("/person/listening", dependencies=[Depends(laptop_only)])
+    def person_listening(body: PersonListening):
+        """The dashboard started recording her answer: an answer longer than the silence timer
+        must not count as silence. Held only for the recording (+2 s to upload); if the page
+        dies mid-recording, silence escalates as usual."""
+        if not s["PI_STT"]:
+            raise HTTPException(status_code=404, detail="PI_STT is off")
+        machine.hold_for_speech(body.seconds + 2)
+        return {"ok": True}
+
+    @app.post("/person/no_speech", dependencies=[Depends(laptop_only)])
+    def person_no_speech():
+        """The recording was quiet the whole time: don't make the Pi transcribe silence, let the
+        silence timer escalate now."""
+        if not s["PI_STT"]:
+            raise HTTPException(status_code=404, detail="PI_STT is off")
+        machine.release_speech_hold()
+        inc = machine.incident
+        log.info("recorded answer was silent; not sent to the Pi incident_id=%s", inc.id if inc else None)
+        return {"ok": True}
+
+    @app.post("/person/audio", dependencies=[Depends(laptop_only)])
+    async def person_audio(request: Request):
+        """A recorded answer (16 kHz mono WAV) for the Pi to transcribe with whisper.cpp.
+        The backend queues a signed transcribe command; the Pi fetches the clip itself."""
+        if not s["PI_STT"]:
+            raise HTTPException(status_code=404, detail="PI_STT is off")
+        raw = await request.body()
+        audio_ms = wav_ms(raw) if len(raw) <= CLIP_MAX_BYTES else None
+        if audio_ms is None:
+            raise HTTPException(status_code=422, detail="expected a 16 kHz mono 16-bit WAV under 15 s")
+        snap = machine.snapshot()
+        inc = machine.incident
+        if not inc or snap["state"] == "IDLE":
+            raise HTTPException(status_code=409, detail="no open incident")
+        now = time.time()
+        for clip_id in [k for k, c in clips.items() if now - c["uploaded_at"] > CLIP_TTL_S]:
+            del clips[clip_id]
+        cmd = make_command(secret, "transcribe", inc.id)
+        clips[cmd.id] = {"wav": raw, "incident_id": inc.id, "device_id": inc.device_id,
+                         "question_index": snap["question_index"], "uploaded_at": now}
+        queues[inc.device_id].append(cmd)
+        machine.hold_for_speech(s["PI_STT_HOLD_S"])
+        telemetry.start(inc.id, f"stt:{cmd.id}", "speech_to_text", source="whisper.cpp on the Pi",
+                        audio_ms=audio_ms)
+        log.info("command queued action=transcribe incident_id=%s device_id=%s id=%s audio_ms=%d",
+                 inc.id, inc.device_id, cmd.id, audio_ms)
+        return {"clip_id": cmd.id, "audio_ms": audio_ms}
+
+    @app.get("/edge/audio/{clip_id}")
+    def edge_audio(clip_id: str, device_id: str, request: Request, ts: Optional[int] = None):
+        ok, reason = verify_audio(secret, device_id, clip_id, ts, request.headers.get("X-Signature"))
+        clip = clips.get(clip_id)
+        if not ok or not clip or clip["device_id"] != device_id or "wav" not in clip:
+            log.warning("audio fetch refused clip=%s device_id=%s reason=%s", clip_id, device_id,
+                        reason if not ok else "unknown clip")
+            raise HTTPException(status_code=401 if not ok else 404, detail=reason if not ok else "unknown clip")
+        wav = clip.pop("wav")  # served once; the metadata stays until the transcript arrives
+        return Response(wav, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     @app.get("/edge/commands", response_model=CommandsResponse)
     def edge_commands(device_id: str, request: Request, ts: Optional[int] = None):
@@ -437,7 +549,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         clients.add(q)
         log.info("dashboard connected clients=%d", len(clients))
         try:
-            await ws.send_json({"type": "incident_update", "data": {"snapshot": True, **machine.snapshot()}})
+            await ws.send_json({"type": "incident_update",
+                                "data": {"snapshot": True, "pi_stt": s["PI_STT"], **machine.snapshot()}})
             while q in clients:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=1.0)

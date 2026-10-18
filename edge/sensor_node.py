@@ -22,8 +22,12 @@ import math
 import os
 import queue
 import select
+import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -32,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from edge import config  # noqa: E402
-from edge.security import CommandVerifier, sign_event, sign_poll  # noqa: E402
+from edge.security import CommandVerifier, sign_audio, sign_event, sign_poll  # noqa: E402
 
 log = logging.getLogger("firsthour.edge")
 
@@ -182,6 +186,119 @@ class UrlHttp:
     def get(self, path, headers=None):
         return self._do(urllib.request.Request(self.base + path, headers=headers or {}))
 
+    def get_bytes(self, path, headers, timeout):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(self.base + path, headers=headers),
+                                        timeout=timeout) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, b""
+
+
+# --- speech-to-text (whisper.cpp, the oss.qnx.com AI module) ------------------------
+
+
+class Transcriber:
+    """whisper.cpp on one WAV clip, always in another process at a lower QNX priority than
+    the reader, so transcription can never delay the alarm, clock or unlock checks.
+
+    A resident whisper-server (loopback only) keeps the model loaded; whisper-cli is the
+    fallback while it starts or if it dies. Measured on the Pi 5, 3 threads, beam search, live
+    answers: whisper-server 2.7-3.1 s with base.en, 1.2-1.6 s with tiny.en; whisper-cli ~3.5 s
+    with tiny.en (2 s is loading)."""
+
+    # Beam search for accuracy, no temperature fallback: on noise, fallback retries ran past
+    # 30 s on the Pi; without it a noise clip took 6 s and came back as no words.
+    CLI_FLAGS = ["-nt", "-np", "-l", "en", "-bs", "5", "-bo", "5", "-nf"]
+    SERVER_FIELDS = {"response_format": "json", "temperature": "0", "temperature_inc": "0",
+                     "beam_size": "5", "best_of": "5"}
+
+    def __init__(self, model, binary=config.WHISPER_BIN, server_binary=config.WHISPER_SERVER_BIN,
+                 threads=config.WHISPER_THREADS, priority=config.WHISPER_PRIORITY,
+                 timeout_s=config.WHISPER_TIMEOUT_S, port=config.WHISPER_PORT):
+        self.timeout_s = timeout_s
+        if sys.platform.startswith("qnx") and shutil.which("on"):
+            prefix = ["on", "-p", str(priority)]
+        elif shutil.which("nice"):
+            prefix = ["nice", "-n", "10"]
+        else:
+            prefix = []
+        common = ["-m", str(model), "-t", str(threads)]
+        self.cmd = prefix + [binary, *common, *self.CLI_FLAGS]
+        self.server_cmd = (prefix + [server_binary, *common, "-l", "en", "-nt",
+                                     "--host", "127.0.0.1", "--port", str(port)]
+                           if server_binary and shutil.which(server_binary) else None)
+        self.url = f"http://127.0.0.1:{port}/inference"
+        self._server = None
+        self._restart_at = 0.0
+
+    def start(self) -> None:
+        """Start (or restart) the resident server. Never blocks on the model loading."""
+        if self.server_cmd is None or time.monotonic() < self._restart_at:
+            return
+        if self._server is not None and self._server.poll() is None:
+            return
+        if self._server is not None:
+            log.warning("whisper-server exited status=%s; restarting", self._server.returncode)
+        self._restart_at = time.monotonic() + 10
+        # Its own process group, so close() also stops what `on` started. Output discarded:
+        # it would include the person's words.
+        self._server = subprocess.Popen(self.server_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def close(self) -> None:
+        if self._server is not None and self._server.poll() is None:
+            try:
+                os.killpg(self._server.pid, 15)
+            except OSError:
+                self._server.kill()
+            self._server.wait()
+
+    @staticmethod
+    def audio_ctx(wav_bytes: int) -> int:
+        frames = (max(0, wav_bytes - 44) // 32 + 19) // 20  # 16 kHz mono 16-bit, 20 ms frames
+        return min(1500, max(384, -(-frames // 64) * 64))
+
+    def __call__(self, wav: bytes) -> str:
+        ctx = str(self.audio_ctx(len(wav)))
+        self.start()
+        if self._server is not None and self._server.poll() is None:
+            try:
+                return clean_transcript(self._via_server(wav, ctx))
+            except ConnectionRefusedError:
+                log.info("whisper-server not ready; using whisper-cli")
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            f.write(wav)
+            f.flush()
+            out = subprocess.run(self.cmd + ["-ac", ctx, "-f", f.name], capture_output=True, text=True,
+                                 timeout=self.timeout_s, check=True)
+        return clean_transcript(out.stdout)
+
+    def _via_server(self, wav: bytes, ctx: str) -> str:
+        b = os.urandom(12).hex()
+        body = b"".join(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                        for k, v in {**self.SERVER_FIELDS, "audio_ctx": ctx}.items())
+        body += (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="clip.wav"\r\n'
+                 f"Content-Type: audio/wav\r\n\r\n").encode() + wav + f"\r\n--{b}--\r\n".encode()
+        req = urllib.request.Request(self.url, data=body,
+                                     headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+                return json.loads(r.read()).get("text", "")
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ConnectionRefusedError):
+                raise e.reason from e
+            raise
+
+
+def clean_transcript(text: str) -> str:
+    """whisper marks non-speech as [BLANK_AUDIO], (wind blowing) etc. Those are not answers,
+    and neither is a decoding loop on noise ("the the the ...")."""
+    text = re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", " ", text)
+    words = text.split()
+    if len(words) >= 8 and len(set(w.lower().strip(".,!?") for w in words)) * 4 <= len(words):
+        return ""
+    return " ".join(words)
 
 # --- the node ------------------------------------------------------------------
 
@@ -197,7 +314,8 @@ class Node:
                  window_ms=config.FUSION_WINDOW_MS, cooldown_s=config.COOLDOWN_S,
                  incident_window_s=config.INCIDENT_WINDOW_SECONDS, poll_s=config.POLL_S,
                  heartbeat_s=config.HEARTBEAT_S, backoff_s=config.OFFLINE_BACKOFF_S,
-                 ack_timeout_s=config.UNLOCK_ACK_TIMEOUT_S):
+                 ack_timeout_s=config.UNLOCK_ACK_TIMEOUT_S, stt=None,
+                 audio_timeout_s=config.AUDIO_FETCH_TIMEOUT_S):
         if not secret:
             raise ValueError("SHARED_SECRET is not set")
         self.device_id, self.secret = device_id, secret
@@ -218,6 +336,10 @@ class Node:
         self._last_poll = self._last_hb = -1e18
         self._last_poll_ts = 0
         self._commands = queue.Queue()  # network thread -> sensor loop
+        self.stt = stt  # wav bytes -> text; None = speech-to-text off on this Pi
+        self.audio_timeout_s = audio_timeout_s
+        # sensor loop -> STT thread. Small: a backlog of stale answers is worse than dropping one.
+        self._stt_jobs = queue.Queue(maxsize=2)
         self._stop = threading.Event()
         self._display = None
         self._show("READY")
@@ -299,11 +421,15 @@ class Node:
 
     # network --------------------------------------------------------------
 
-    def _queue(self, type_, sensors=None):
+    def _queue(self, type_, sensors=None, speech=None, incident_id=None):
         """Sign and persist an event. tick() delivers it, in order, when the backend is reachable."""
         ts = int(self._clock() * 1000)
+        if incident_id is None and self.incident:
+            incident_id = self.incident["id"]
         body = {"device_id": self.device_id, "ts": ts, "type": type_, "sensors": sensors or {},
-                "local_incident_id": self.incident["id"] if self.incident else None}
+                "local_incident_id": incident_id}
+        if speech is not None:
+            body["speech"] = speech
         raw = json.dumps(body, separators=(",", ":"))
         self.outbox.add({"raw": raw, "sig": sign_event(self.secret, ts, raw.encode())})
         log.info("event queued type=%s local_incident_id=%s outbox=%d", type_, body["local_incident_id"], len(self.outbox))
@@ -317,6 +443,14 @@ class Node:
                 except Exception:  # never let the network thread die mid-incident
                     log.exception("network step failed")
         threading.Thread(target=run, daemon=True, name="edge-net").start()
+        if self.stt is not None:
+            def run_stt():
+                while not self._stop.is_set():
+                    try:
+                        self.stt_step(timeout=0.5)
+                    except Exception:
+                        log.exception("speech-to-text step failed")
+            threading.Thread(target=run_stt, daemon=True, name="edge-stt").start()
 
     def stop_network(self):
         self._stop.set()
@@ -396,6 +530,53 @@ class Node:
             self._close_incident("backend alarm_off")
         elif action == "display":
             log.info("display command has no text field in the contract yet; ignored")
+        elif action == "transcribe":
+            self._start_transcribe(cmd["id"], self.incident["id"])
+
+    # speech-to-text ---------------------------------------------------------
+
+    def _start_transcribe(self, clip_id, incident_id):
+        """Sensor loop: hand the clip to the STT thread and return at once."""
+        if self.stt is None or self.http is None:
+            log.warning("transcribe refused: speech-to-text is off on this Pi clip=%s", clip_id)
+            self._queue("speech_text", speech={"clip_id": clip_id, "error": "speech-to-text is off on the Pi"},
+                        incident_id=incident_id)
+            return
+        try:
+            self._stt_jobs.put_nowait((clip_id, incident_id))
+        except queue.Full:
+            log.warning("transcribe dropped: speech-to-text busy clip=%s", clip_id)
+            self._queue("speech_text", speech={"clip_id": clip_id, "error": "speech-to-text busy"},
+                        incident_id=incident_id)
+
+    def stt_step(self, timeout=0.0):
+        """STT thread: fetch one clip, run whisper.cpp, queue speech_text. Never touches serial."""
+        try:
+            clip_id, incident_id = self._stt_jobs.get(timeout=timeout) if timeout else self._stt_jobs.get_nowait()
+        except queue.Empty:
+            return
+        result = {"clip_id": clip_id}
+        try:
+            if not self.incident or self.incident["id"] != incident_id:
+                raise RuntimeError("local incident closed")
+            ts = int(self._clock() * 1000)
+            status, wav = self.http.get_bytes(
+                f"/edge/audio/{clip_id}?device_id={self.device_id}&ts={ts}",
+                {"X-Signature": sign_audio(self.secret, ts, self.device_id, clip_id)}, self.audio_timeout_s)
+            if status != 200:
+                raise RuntimeError(f"clip fetch refused status={status}")
+            result["audio_ms"] = max(0, len(wav) - 44) // 32  # 16 kHz mono 16-bit
+            t0 = time.monotonic()
+            text = self.stt(wav)
+            result["stt_ms"] = int((time.monotonic() - t0) * 1000)
+            result["text"] = text
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+            result["error"] = str(e)[:200] or type(e).__name__
+        # The words are the person's answer: log only timings and length.
+        log.info("speech-to-text clip=%s incident_id=%s audio_ms=%s stt_ms=%s words=%d error=%s",
+                 clip_id, incident_id, result.get("audio_ms"), result.get("stt_ms"),
+                 len(result.get("text", "").split()), result.get("error"))
+        self._queue("speech_text", speech=result, incident_id=incident_id)
 
 
     def _on_unlock_ack(self):
@@ -726,15 +907,34 @@ def main():
         source = SerialSource(args.serial, config.SERIAL_BAUD)
     else:
         sys.exit("no serial port: pass --serial PORT, --usb, or set SERIAL_PORT in .env")
+    stt = None
+    if config.WHISPER_MODEL:
+        if Path(config.WHISPER_MODEL).is_file() and shutil.which(config.WHISPER_BIN):
+            stt = Transcriber(config.WHISPER_MODEL)
+        else:
+            log.error("WHISPER_MODEL or WHISPER_BIN not found; speech-to-text off")
     node = Node(
         device_id=config.DEVICE_ID, secret=config.SHARED_SECRET,
         write_serial=source.write,
         http=None if args.offline else UrlHttp(args.backend, config.HTTP_TIMEOUT_S),
         outbox_path=config.LOG_DIR / "outbox.jsonl",
+        stt=stt,
     )
-    log.info("edge node up device_id=%s backend=%s", config.DEVICE_ID, "offline" if args.offline else args.backend)
-    node.start_network()
+    log.info("edge node up device_id=%s backend=%s speech_to_text=%s", config.DEVICE_ID,
+             "offline" if args.offline else args.backend,
+             " ".join(stt.server_cmd or stt.cmd) if stt else "off")
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    # Launched detached (`nohup ... &`), the reader ignores SIGINT, so SIGTERM is how it is
+    # stopped. Raising here runs the cleanup below; whisper-server has its own session and
+    # would otherwise outlive the reader.
+    signal.signal(signal.SIGTERM, stop)
     try:
+        if stt:
+            stt.start()
+        node.start_network()
         while True:
             if args.usb:
                 source.reconnect()
@@ -751,6 +951,8 @@ def main():
         raise
     finally:
         node.stop_network()
+        if stt:
+            stt.close()
         if args.usb:
             source.close()
 

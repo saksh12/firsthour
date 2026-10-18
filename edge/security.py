@@ -30,9 +30,15 @@ def sign_poll(secret, ts, device_id):
     return _hmac_hex(secret, f"{ts}.{device_id}".encode())
 
 
+def sign_audio(secret, ts, device_id, clip_id):
+    """X-Signature for GET /edge/audio/<clip_id>: hex(HMAC_SHA256(secret, ts.device_id.clip_id))."""
+    return _hmac_hex(secret, f"{ts}.{device_id}.{clip_id}".encode())
+
+
 # Commands that act on one incident. The Pi only obeys them for its own open incident,
-# so a stale backend incident can never unlock the door or silence a newer fall.
-INCIDENT_ACTIONS = ("unlock", "alarm_off")
+# so a stale backend incident can never unlock the door, silence a newer fall, or make
+# the Pi fetch audio outside an incident.
+INCIDENT_ACTIONS = ("unlock", "alarm_off", "transcribe")
 
 
 class CommandVerifier:

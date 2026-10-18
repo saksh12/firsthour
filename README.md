@@ -33,11 +33,12 @@ Last updated Sat Oct 17, 8:20 PM.
 | `backend/` state machine | `IDLE → CHECKING → ALERTING → RESPONDING → UNLOCKED → RESOLVED` | ✅ | Escalation never waits on StepFun |
 | `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ | Full test suite |
 | `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say |
-| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Triage runs in the background (15 s, one call at a time per incident) after the instant rule record; the reply rewrite has its own pool and a 3 s deadline |
+| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Triage runs in the background (45 s, one call at a time per incident) after the instant rule record and can never turn an unclear answer into a reassuring "no"; the reply rewrite has its own pool and a 3 s deadline. Measured Oct 18: triage 5-38 s (longest on unclear answers), rewrite 2.3 s |
 | `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
-| `backend/` voice | Speak the fixed questions and caregiver replies | 🔶 | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends; real-key run pending |
+| `backend/` voice | Speak the fixed questions and caregiver replies | ✅ live | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends. Real ElevenLabs stock voice played live in three knock runs (`STUB_ELEVENLABS=0`) |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
-| `edge/` on the Pi | Same code on QNX over USB serial | ⬜ | Pi 5. QNX's sources say: `whisper.cpp`/`onnxruntime` prebuilt, USB audio only, no HAM, and Arduino USB-serial may not auto-load (test `ls /dev/ser*` first). Details in #22 |
+| `edge/` on the Pi | Same code on QNX 8 (Pi 5), BOX-3 over raw USB | ✅ | See `connect.md`. Details in #22 |
+| QNX AI module | `whisper.cpp` (oss.qnx.com apk, `ggml-base.en`) transcribes the person's answers on the Pi | ✅ live | `PI_STT=1`. Mic on the laptop (AirPods); the Pi fetches each clip signed. Measured whisper 2.7-3.1 s per clip, upload to answer applied 3.8-4.3 s (model comparison in `edge/README.md`). The all-silent recording path is unit-tested only |
 | `arduino/hub.ino` | Sensors, simulated latch (LED), buzzer, display | ⬜ | Need accelerometer chip and display type |
 | `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first (a blocked alert is resent on their first text). Gateway replies are HMAC-signed with replay protection (#14) |
 | Phone calls | Photon SMS number → ElevenLabs agent over SIP | 🔶 | Test calls in and out passed; the backend doesn't place the escalation call yet (#23) |

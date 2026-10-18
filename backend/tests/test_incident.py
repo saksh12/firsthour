@@ -379,3 +379,30 @@ def test_failed_refinement_does_not_block_the_next_one(clock, rec):
     m.on_answer("help")
     m.on_answer("no")
     assert calls == [1, 2]
+def test_a_refinement_overtaken_by_new_answers_still_counts(clock, rec):
+    """Live, answers came every ~10 s and StepFun took 11-17 s, so every result was stale and
+    the dashboard never showed what it understood (pain on her "jawline")."""
+    from app.models import TriageRecord
+
+    calls = []
+
+    def slow(answers, profile):
+        calls.append(len(answers))
+        if len(calls) == 1:
+            m.on_answer("yes I did")  # her next answer lands while the model is thinking
+            return TriageRecord(conscious=True, pain_location="earlobe", can_move=True, bleeding=False,
+                                summary="model saw 1 answer")
+        return parse_rules(answers, profile)  # the rerun fell back to rules
+
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    m = IncidentMachine(guard, DEMO_PROFILE, clock=clock, emit=rec.emit, speak=rec.spoken.append,
+                        triage_fn=slow, background=lambda fn: fn())
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("I need help, it hurts on my earlobe")  # a part the rules don't know
+    assert calls == [1, 2]
+    carried = [d["triage"] for t, d in rec.events if t == "triage_update" and d["triage"]["pain_location"] == "earlobe"]
+    assert carried, "what the stale call learned was dropped"
+    t = carried[0]
+    assert t["head_strike"] is True                          # the newer answer, from the rules
+    assert t["can_move"] is None and t["bleeding"] is None   # never a reassurance nobody heard
+    assert "model saw" not in t["summary"]                   # its summary predates the new answer

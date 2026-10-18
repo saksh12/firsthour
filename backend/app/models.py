@@ -11,8 +11,10 @@ from pydantic import AliasChoices, BaseModel, Field
 
 # --- 6.2 Edge to backend -----------------------------------------------------
 
+# speech_text: the Pi's whisper.cpp transcript of a clip it fetched for a transcribe command.
 EdgeEventType = Literal[
-    "fall_suspected", "heartbeat", "help_button", "local_unlock", "unlock_failed", "cancelled"
+    "fall_suspected", "heartbeat", "help_button", "local_unlock", "unlock_failed", "cancelled",
+    "speech_text",
 ]
 
 
@@ -22,18 +24,30 @@ class SensorReading(BaseModel):
     dist_cm: Optional[int] = None
 
 
+class SpeechResult(BaseModel):
+    """What the Pi heard in one clip. Empty text means no words (silence stays silence)."""
+
+    clip_id: str
+    text: str = ""
+    stt_ms: Optional[int] = None    # whisper.cpp wall time on the Pi
+    audio_ms: Optional[int] = None  # clip length
+    error: Optional[str] = None     # set when the Pi could not transcribe
+
+
 class EdgeEvent(BaseModel):
     device_id: str
     ts: int
     type: EdgeEventType
     sensors: SensorReading = Field(default_factory=SensorReading)
     local_incident_id: Optional[str] = None
+    speech: Optional[SpeechResult] = None  # only on speech_text
 
 
 # --- 6.3 Backend to edge -----------------------------------------------------
 
 # reset: demo reset. The Pi obeys it only with no local incident open (incident_id is "").
-CommandAction = Literal["unlock", "lock", "alarm_on", "alarm_off", "display", "reset"]
+# transcribe: fetch clip <id> from GET /edge/audio/<id> and post a speech_text event.
+CommandAction = Literal["unlock", "lock", "alarm_on", "alarm_off", "display", "reset", "transcribe"]
 
 
 class Command(BaseModel):
@@ -105,7 +119,8 @@ class UnlockResult(BaseModel):
 # --- 6.7 Dashboard live events -----------------------------------------------
 
 DashboardEventType = Literal[
-    "incident_update", "triage_update", "message_in", "message_out", "unlock_attempt", "device_status"
+    "incident_update", "triage_update", "message_in", "message_out", "unlock_attempt", "device_status",
+    "question_played", "speech_heard", "voice_line",
 ]
 
 

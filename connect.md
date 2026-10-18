@@ -63,12 +63,22 @@ image; use bounded `tail -n` reads.
 ## 3. Check the backend from the Mac
 
 The current hardware test backend is separate from the original port-8000
-backend. It listens on `0.0.0.0:8001`, uses real Pi events, and stubs StepFun,
-ElevenLabs and Photon. Voice playback and Sentry are off in this test instance.
+backend. It listens on `0.0.0.0:8002`, uses real Pi events, speaks with
+ElevenLabs, and sends the person's recorded answers to the Pi's whisper.cpp
+(`PI_STT=1`, see IMPLEMENTATION.md 6.8). StepFun and Photon are stubbed and
+Sentry is off. The older port-8001 backend (no Pi speech-to-text) may still be
+running; the Pi only talks to the one in its `--backend` URL.
+
+Start it from the Mac repository root if it is stopped. The root `.env` must
+hold `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`; the fixed phrases are
+cached under `backend/audio_cache/` on first start.
 
 ```bash
-curl --max-time 5 http://127.0.0.1:8001/health
-curl --max-time 5 http://127.0.0.1:8001/incident
+STUB_EDGE=0 STUB_STEPFUN=1 STUB_ELEVENLABS=0 STUB_PHOTON=1 SENTRY_DSN= PI_STT=1 \
+  backend/.venv/bin/python -m uvicorn --app-dir backend app.main:app \
+  --host 0.0.0.0 --port 8002 --no-access-log >> /tmp/fh-backend-8002.log 2>&1 &
+curl --max-time 5 http://127.0.0.1:8002/health
+curl --max-time 5 http://127.0.0.1:8002/incident
 ```
 
 Expect `edge: "live"` and a recent `bath-qnx-usb-test` heartbeat. A stale Pi
@@ -76,7 +86,9 @@ heartbeat makes `/health` return 503. A heartbeat confirms the Pi process is
 alive; use the Pi logs to confirm USB recovery and sensor activity.
 
 Open the dashboard at
-[localhost:5173](http://localhost:5173/?backend=http://localhost:8001).
+[localhost:5173](http://localhost:5173/?backend=http://localhost:8002).
+Choose the Pi speech-to-text answer mode and allow the microphone (AirPods in the
+demo). The page records after each question and shows the live conversation.
 If its static server is stopped, start it from the Mac repository root:
 
 ```bash
@@ -92,15 +104,17 @@ USB identifier is `303a:1001`.
 
 Before replacing a running reader, resolve the demo incident using step 5.
 Find the current **parent** PID with the sudo `pidin` command above. Stop that
-specific parent with SIGINT; replace `<parent_pid>` before running this command
-on the Pi:
+specific parent with SIGTERM; the detached launch below leaves SIGINT ignored.
+Replace `<parent_pid>` before running this command on the Pi:
 
 ```bash
-sudo -n /data/home/qnxuser/fh-venv/bin/python -c 'import os, signal; os.kill(<parent_pid>, signal.SIGINT)'
+sudo -n /data/home/qnxuser/fh-venv/bin/python -c 'import os, signal; os.kill(<parent_pid>, signal.SIGTERM)'
 ```
 
-Confirm that both parent and helper have exited. Killing only the helper makes
-the parent restart it. Do not reuse a historical PID from a handoff.
+Confirm that the parent, the `--usb-worker` helper and `whisper-server` have all
+exited. Killing only the helper makes the parent restart it. Readers older than
+the `edge/box3-voice` branch leave `whisper-server` running after SIGTERM; stop
+that PID too. Do not reuse a historical PID from a handoff.
 
 Check the deployed branch before copying code. The Pi can run a tested PR that
 is ahead of `main`. Preserve its root `.env`, logs and calibration captures.
@@ -120,19 +134,22 @@ On the Pi, start one reader detached from SSH:
 ```bash
 cd /data/home/qnxuser/firsthour
 sudo -n mkdir -p edge/logs
-sudo -n sh -c 'nohup /data/home/qnxuser/fh-venv/bin/python -u edge/sensor_node.py --usb --backend http://172.20.10.2:8001 >> edge/logs/reader-stderr.log 2>&1 </dev/null &'
+sudo -n sh -c 'WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin nohup /data/home/qnxuser/fh-venv/bin/python -u edge/sensor_node.py --usb --backend http://172.20.10.2:8002 >> edge/logs/reader-stderr.log 2>&1 </dev/null &'
 ```
 
-Use the current Mac address if it changed. Verify both processes and a fresh
-heartbeat after the launching SSH session exits. This does not configure
-automatic startup after a Pi reboot.
+Use the current Mac address if it changed. `WHISPER_MODEL` turns on the Pi's
+speech-to-text (the `whisper.cpp` apk; the model file is already on the Pi).
+Leave it out to run without it. Verify three processes (reader, `--usb-worker`
+helper, `whisper-server` at priority 8) and a fresh heartbeat after the
+launching SSH session exits. This does not configure automatic startup after a
+Pi reboot.
 
 ## 5. Reset a demo incident
 
 From the **Mac repository root**, run:
 
 ```bash
-BACKEND_URL=http://127.0.0.1:8001 bash scripts/demo_reset.sh
+BACKEND_URL=http://127.0.0.1:8002 bash scripts/demo_reset.sh
 ```
 
 The script reads the root `.env` without printing its secret. The backend

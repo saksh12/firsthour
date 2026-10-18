@@ -211,6 +211,15 @@ def test_on_played_reports_each_line_after_it_plays(voice_factory):
     assert reported == [("Are you okay?", ["Are you okay?"])]  # reported after playing
 
 
+def test_on_start_reports_each_line_before_it_plays(voice_factory):
+    played, started = [], []
+    v = voice_factory(stub=True, player=lambda argv: played.append(argv[-1]),
+                      on_start=lambda text: started.append((text, list(played))))
+    v.speak("Are you okay?")
+    assert wait_for(lambda: played)
+    assert started == [("Are you okay?", [])]  # reported before playing
+
+
 def test_on_played_fires_immediately_when_playback_is_off(voice_factory):
     reported = []
     v = voice_factory(playback=False, on_played=reported.append)

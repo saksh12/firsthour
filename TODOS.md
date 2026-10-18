@@ -52,7 +52,12 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 - [ ] (A+B) `STUB_EDGE=0`: signed events + verified commands; wrong secret rejected
 - [ ] (B) `STUB_STEPFUN=0`, latency logged
-- [ ] (C) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock
+- [x] (C · Droid) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock: stock voice, 6 fixed phrases cached on the port-8002 test backend (`edge/box3-voice`); played live through three knock runs on the real Pi
+- [x] (A · Droid) QNX AI module (#22, `edge/box3-voice`): `whisper.cpp` on the Pi transcribes the person's answers (laptop mic → signed clip fetch → `speech_text`). Live AirPods runs: help path and "I'm fine" cancel. tiny.en: whisper 1.16-1.55 s per clip, upload to answer applied 1.6-2.4 s; base.en (demo model, more accurate): 2.7-3.1 s and 3.8-4.3 s
+- [ ] (A) Live check of an all-silent recording with Pi speech-to-text (unit-tested only)
+- [ ] (B) Rules don't read hedged amounts like "a little, not very much" (moving); StepFun may fill it, but only when its reply lands before the incident ends
+- [x] (B · Droid) StepFun live on the port-8002 test backend (`edge/box3-voice`): rules win, the model only adds worrying answers, stale results carry forward. Measured 5-38 s on `low`; 45 s timeout, `max_tokens` 5000
+- [ ] (A) Split the Pi safety node into separate QNX processes (#22 step 1), on its own branch
 - [ ] (C) Photon gateway: text out, reply in (90-minute cap, then simulator)
 - [ ] (D) Sentry tracing spans + uptime monitor on tunneled `/health`
 - [x] (A · Codex) Local BOX-3 alarm + `TIME DOWN` with test backend paused; operator confirmed alarm, ticking clock, and locked latch; incident replayed on reconnect
