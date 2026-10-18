@@ -236,3 +236,31 @@ def test_real_requires_key_and_voice_id(voice_factory):
     v.speak("hi")
     assert wait_for(lambda: played)
     assert played[0][0].endswith("say")
+
+
+def test_concurrent_fetch_of_one_line_never_drops_it(tmp_path):
+    """Prewarm and the playback worker can synthesize the same line at once
+    (a fall right after startup). Both must get the file, neither may raise."""
+    gate = threading.Barrier(2)
+
+    def tts(url, headers, body, timeout):
+        gate.wait(2)  # both fetches return together, so their writes race
+        return b"ID3-fake-mp3"
+
+    for i in range(20):
+        v = Voice(**real(), cache_dir=tmp_path / str(i), transport=tts, afplay="", say="")
+        errors, out = [], []
+
+        def fetch():
+            try:
+                out.append(v._audio("Are you okay?")[0])
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=fetch) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        v.stop()
+        assert not errors and len(out) == 2 and all(p.exists() for p in out)

@@ -34,7 +34,7 @@ from pathlib import Path
 
 log = logging.getLogger("firsthour.voice")
 
-# ELEVENLABS_BASE_URL can point at another OpenAI-shaped endpoint (dev/proxy).
+# ELEVENLABS_BASE_URL can point at a mock or proxy with the same API shape.
 TTS_BASE_URL = "https://api.elevenlabs.io"
 TTS_URL = "{base}/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
 DEFAULT_MODEL = "eleven_turbo_v2_5"  # low-latency; override with ELEVENLABS_MODEL
@@ -138,7 +138,8 @@ class Voice:
         if audio is None:
             return None, False, "tts-failed"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        # Per-thread tmp: prewarm and the worker may fetch the same line at once.
+        tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
         tmp.write_bytes(audio)
         tmp.replace(path)  # atomic: a crashed write never leaves a half file
         return path, False, ""
