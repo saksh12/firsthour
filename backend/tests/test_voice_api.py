@@ -135,3 +135,101 @@ def test_question_answered_in_thread_over_http(client):
     assert last["kind"] == "answer" and last["text"].startswith("Margaret has been down")
     types = [e.type for e in client.app.state.events]
     assert "delivery_status" in types
+
+
+# --- the finished call fetched from ElevenLabs when the webhook does not arrive (dead tunnel) ---
+
+def conversation(conv_id, turns, status="done", incident_id=None):
+    """GET /v1/convai/conversations/{id} body, the same model the webhook wraps in `data`."""
+    return {"conversation_id": conv_id, "agent_id": "a", "status": status,
+            "transcript": [{"role": "agent", "message": "How many minutes?"}] +
+                          [{"role": "user", "message": t} for t in turns],
+            "analysis": {"transcript_summary": "Caregiver will come."},
+            "conversation_initiation_client_data": {"dynamic_variables": {"incident_id": incident_id}}}
+
+
+def test_result_fetches_the_conversation_and_waits_while_it_runs():
+    seen = []
+    state = {"status": "in-progress"}
+    calls = VoiceCalls(stub=False, api_key="k", agent_id="ag", phone_number_id="ph",
+                       fetch=lambda url, h, t: seen.append((url, h)) or conversation("conv 1", ["ten"], state["status"]))
+    assert calls.result("conv 1") is None
+    assert seen[0] == ("https://api.elevenlabs.io/v1/convai/conversations/conv%201", {"xi-api-key": "k"})
+    state["status"] = "done"
+    r = calls.result("conv 1")
+    assert r == {"conversation_id": "conv 1", "incident_id": None, "user_turns": ["ten"],
+                 "summary": "Caregiver will come.", "status": "done"}
+    assert VoiceCalls(stub=True).result("conv 1") is None  # stub calls have nothing to fetch
+
+
+def arm_poll(client, fetch):
+    """A stub call was placed; make the app treat it as real for the result poll."""
+    calls = client.app.state.calls
+    calls.real, calls._fetch = True, fetch
+    return calls.log[0]["conversation_id"]
+
+
+def test_poll_carries_the_call_back_when_the_webhook_never_comes(client):
+    escalate(client)
+    client.app.state.machine.tick()
+    conv = arm_poll(client, lambda url, h, t: conversation(conv, ["I'll be there in 5 minutes"]))
+    inc = client.get("/incident").json()["incident_id"]
+    r = client.app.state.poll_call_result(conv, inc, sleep=lambda _s: None)
+    assert r["status"] == "arriving"
+    assert client.get("/incident").json()["state"] == "RESPONDING"
+    assert client.app.state.spoken[-2] == "Sarah is about 5 minutes away."
+    texts = client.get("/comms/stub/outbox").json()["messages"]
+    assert texts[-1]["text"].startswith("You said 5 minutes on the call.")
+    # The webhook arriving late for the same call changes nothing and texts no second code.
+    raw = postcall(conv, ["I'll be there in 5 minutes"])
+    r = client.post("/voice/postcall", content=raw, headers={"ElevenLabs-Signature": sign(raw)}).json()
+    assert r == {"ok": True, "accepted": False, "reason": "already recorded"}
+    assert client.get("/comms/stub/outbox").json()["messages"] == texts
+
+
+def test_poll_stops_once_the_webhook_recorded_the_call(client):
+    escalate(client)
+    client.app.state.machine.tick()
+    fetched = []
+    conv = arm_poll(client, lambda url, h, t: fetched.append(url) or conversation(conv, ["five"]))
+    inc = client.get("/incident").json()["incident_id"]
+    raw = postcall(conv, ["I'll be there in 5 minutes"])
+    assert client.post("/voice/postcall", content=raw, headers={"ElevenLabs-Signature": sign(raw)}).status_code == 200
+    assert client.app.state.poll_call_result(conv, inc, sleep=lambda _s: None) is None
+    assert fetched == []
+
+
+def test_poll_stops_when_the_incident_is_over_and_retries_after_an_error(client):
+    escalate(client)
+    client.app.state.machine.tick()
+    attempts = []
+
+    def flaky(url, h, t):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise OSError("tunnel-less network blip")
+        return conversation(conv, [], status="in-progress")
+
+    conv = arm_poll(client, flaky)
+    inc = client.get("/incident").json()["incident_id"]
+    ticks = {"n": 0}
+
+    def sleep(_s):
+        ticks["n"] += 1
+        if ticks["n"] == 3:  # the operator resolves while the call is still running
+            client.post("/incident/resolve")
+
+    assert client.app.state.poll_call_result(conv, inc, sleep=sleep) is None
+    assert len(attempts) == 2  # error, then still running, then the incident was gone
+    assert client.get("/incident").json()["state"] == "IDLE"
+
+
+def test_poll_reports_a_call_that_failed_on_the_provider_side(client):
+    escalate(client)
+    client.app.state.machine.tick()
+    conv = arm_poll(client, lambda url, h, t: conversation(conv, [], status="failed"))
+    inc = client.get("/incident").json()["incident_id"]
+    assert client.app.state.poll_call_result(conv, inc, sleep=lambda _s: None) is None
+    updates = [e.data for e in client.app.state.events if e.type == "call_update"]
+    assert updates[-1]["status"] == "failed" and updates[-1]["incident_id"] == inc
+    assert client.get("/incident").json()["state"] == "ALERTING"
