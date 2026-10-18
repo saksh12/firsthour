@@ -52,4 +52,20 @@ OFFLINE_BACKOFF_S = _f("OFFLINE_BACKOFF_SECONDS", "5")
 HTTP_TIMEOUT_S = _f("HTTP_TIMEOUT_SECONDS", "1")
 UNLOCK_ACK_TIMEOUT_S = _f("UNLOCK_ACK_TIMEOUT_SECONDS", "2")  # U sent, no ACK,U -> unlock_failed
 
+# Speech-to-text on the Pi: whisper.cpp from oss.qnx.com (`apk add whisper.cpp`).
+# Empty WHISPER_MODEL = off; transcribe commands then answer with an error, never a guess.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "")  # e.g. /data/home/qnxuser/fh-models/ggml-base.en.bin
+WHISPER_BIN = os.getenv("WHISPER_BIN", "whisper-cli")
+WHISPER_SERVER_BIN = os.getenv("WHISPER_SERVER_BIN", "whisper-server")  # empty = whisper-cli only
+WHISPER_PORT = int(os.getenv("WHISPER_PORT", "8090"))  # bound to 127.0.0.1 only
+# 3, not 4, on the Pi 5's 4 cores: with every core taken, whichever whisper thread the reader or
+# the USB helper preempts stalls the others at each decode step. Measured: 272 ms per token with
+# 4 threads, 9.5 ms with 3.
+WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "3"))
+# QNX priority for whisper-server and whisper-cli. The reader runs at the default 10, so the safety loop and the
+# USB helper preempt transcription whenever they have work.
+WHISPER_PRIORITY = int(os.getenv("WHISPER_PRIORITY", "8"))
+WHISPER_TIMEOUT_S = _f("WHISPER_TIMEOUT_SECONDS", "10")
+AUDIO_FETCH_TIMEOUT_S = _f("AUDIO_FETCH_TIMEOUT_SECONDS", "5")
+
 LOG_DIR = Path(os.getenv("EDGE_LOG_DIR", str(REPO / "edge" / "logs")))

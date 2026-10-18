@@ -55,11 +55,13 @@ class Voice:
     def __init__(self, *, playback: bool = True, stub: bool = True,
                  api_key: str = "", voice_id: str = "", model: str = DEFAULT_MODEL,
                  base_url: str = TTS_BASE_URL, cache_dir=CACHE_DIR, transport=None, player=None,
-                 afplay=None, say=None, timeout: float = TIMEOUT_S, span=None, on_played=None):
+                 afplay=None, say=None, timeout: float = TIMEOUT_S, span=None, on_played=None,
+                 on_start=None):
         self.playback = playback
         # Called with each line once it has finished playing (or failed to), so the
         # silence timer counts from when she heard the question, not when it was queued.
         self._on_played = on_played or (lambda text: None)
+        self._on_start = on_start or (lambda text: None)  # the line starts playing now
         self.stub = stub
         self.api_key, self.voice_id, self.model = api_key, voice_id, model
         self.base_url = base_url.rstrip("/")
@@ -85,6 +87,7 @@ class Voice:
         if not text:
             return
         if not self.playback:
+            self._on_start(text)
             self._on_played(text)  # nothing to wait for
             return
         self._q.put(text)
@@ -130,6 +133,10 @@ class Voice:
             item = self._q.get()
             if item is _STOP:
                 return
+            try:
+                self._on_start(item)
+            except Exception:
+                log.exception("on_start failed ref=%s", line_ref(item))
             try:
                 self._speak_one(item)
             except Exception as e:  # playback must never crash the incident flow

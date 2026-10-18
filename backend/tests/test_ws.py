@@ -24,7 +24,8 @@ def read_until(ws, type_, pred=lambda d: True, limit=50):
 def test_first_message_is_a_snapshot():
     with LaptopClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
         msg = ws.receive_json()
-        assert msg == {"type": "incident_update", "data": {"snapshot": True, "state": "IDLE", "incident_id": None}}
+        assert msg == {"type": "incident_update", "data": {"snapshot": True, "pi_stt": False, "state": "IDLE",
+                                                         "incident_id": None}}
 
 
 def test_snapshot_mid_incident_has_clock_and_transcript():

@@ -224,7 +224,9 @@ D,<text>   # show short text on LCD/segment display
 }
 ```
 
-`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `local_unlock` (the Arduino confirmed with `ACK,U`), `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`), `cancelled`.
+`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `local_unlock` (the Arduino confirmed with `ACK,U`), `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`), `cancelled`, `speech_text` (the Pi's whisper.cpp transcript for a `transcribe` command, section 6.8).
+
+`speech_text` adds `"speech": {"clip_id", "text", "stt_ms", "audio_ms", "error"}`. `clip_id` is the `transcribe` command's `id`. Empty `text` means no words were heard; `error` is set when the Pi could not transcribe (STT off, busy, fetch failed, timeout). Both count as no answer, so the silence timer still escalates.
 
 Header: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
@@ -247,7 +249,7 @@ The poll is signed: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + devi
 }
 ```
 
-`action` is one of: `unlock`, `lock`, `alarm_on`, `alarm_off`, `display`, `reset`. `reset` (demo reset, `incident_id` `""`) locks, turns the alarm off, clears the fusion cooldown and shows `READY`; the Pi obeys it only when no local incident is open.
+`action` is one of: `unlock`, `lock`, `alarm_on`, `alarm_off`, `display`, `reset`, `transcribe`. `reset` (demo reset, `incident_id` `""`) locks, turns the alarm off, clears the fusion cooldown and shows `READY`; the Pi obeys it only when no local incident is open. `transcribe` (section 6.8) is obeyed only for the Pi's own open incident, like `unlock`.
 
 The Pi **must** check: signature valid, `ts` within 10 seconds, nonce not seen before, and (for `unlock`) a local incident is open.
 
@@ -327,7 +329,20 @@ The signature covers the whole body, so a captured reply can be resent inside th
 
 ### 6.7 Dashboard live events (WebSocket from backend)
 
-`incident_update`, `triage_update`, `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`.
+`incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying). The first snapshot also carries `pi_stt` (true when `PI_STT=1`).
+
+### 6.8 Speech-to-text on the Pi (QNX AI module: whisper.cpp)
+
+On only with `PI_STT=1` on the backend and `WHISPER_MODEL` set on the Pi. The microphone is on the laptop (AirPods in the demo; the USB webcam mic failed in QNX `io-snd`). Whisper runs on the Pi, so the person's answer is understood by the safety node, not the cloud.
+
+1. After `question_played`, the dashboard records up to `8 s` (stops early after 1.5 s of quiet once she has spoken) and posts `POST /person/listening {seconds}` when it starts. The backend holds the silence timer for `seconds + 2`.
+2. Quiet the whole time: the dashboard posts `POST /person/no_speech`; the hold is released and silence escalates as usual. Nothing goes to the Pi.
+3. Otherwise it posts the clip as a 16 kHz mono 16-bit WAV (under 15 s) to `POST /person/audio`. The backend keeps it in memory only (deleted after 60 s if unfetched, or when the incident closes), queues a signed `transcribe` command whose `id` is the clip id, and holds the silence timer for `PI_STT_HOLD_SECONDS` (default 20).
+4. The Pi verifies the command, then fetches `GET /edge/audio/<clip_id>?device_id=<id>&ts=<ms>` with `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id + "." + clip_id))`. Bad or stale (> 10 s) signature: 401. Unknown clip, other device, or already fetched: 404. Each clip is served once.
+5. The Pi transcribes on its STT thread with a resident `whisper-server` bound to `127.0.0.1` at QNX priority 8 (the reader runs at 10), falling back to `whisper-cli`, and posts `speech_text`. The sensor loop never waits on it.
+6. The backend treats the text exactly like a typed answer (`/person/answer`): only a clear "I'm fine" cancels. Empty text or an error releases the hold, so silence still escalates.
+
+All three `/person/*` routes are laptop-only and answer 404 while `PI_STT=0`. The words are never logged on either side; logs keep clip id, latency, length and word count.
 
 ---
 
@@ -854,7 +869,7 @@ Check each box with a screenshot or log line you can show.
 | Sponsor | What their challenge asks for | Our proof |
 | --- | --- | --- |
 | **Main track: Beyond the Digital** | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, simulated latch |
-| **QNX** | (1) product uses **QNX OS**; (2) includes **one open-source AI module from oss.qnx.com** | [ ] QNX booting on the Pi [ ] named module running on the Pi |
+| **QNX** | (1) product uses **QNX OS**; (2) includes **one open-source AI module from oss.qnx.com** | [x] QNX 8 booting on the Pi 5 [x] `whisper.cpp` (`apk add whisper.cpp`, model `ggml-base.en`) transcribing the person's answers on the Pi (section 6.8) |
 | **Photon** | A messaging or calling agent using **Photon 2.0 beta** | [ ] real text sent and received [ ] voice call if available |
 | **StepFun** | App must **call `step-5-preview` at runtime**; explain what each model does; judged on completing the task, reliability and user control | [ ] call visible in logs [ ] transcript and record visible in UI |
 | **ElevenLabs (MLH)** | Best use of ElevenLabs | [ ] voice plays in the demo |

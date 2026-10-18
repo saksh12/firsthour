@@ -121,3 +121,12 @@ def test_not_bleeding_in_free_text():
 def test_blood_thinner_comes_from_profile_only():
     rec = parse_rules([("ok", "I'm on a blood thinner")], {"on_blood_thinner": False})
     assert rec.on_blood_thinner is False
+@pytest.mark.parametrize("text,expected", [
+    ("It hurts a lot on my jawline.", "jawline"),
+    ("my jaw", "jaw"),
+    ("my lower spine", "spine"),
+    ("my ribs on the left", "rib"),
+    ("right thigh", "right thigh"),
+])
+def test_more_body_parts(text, expected):
+    assert find_body_part(text) == expected

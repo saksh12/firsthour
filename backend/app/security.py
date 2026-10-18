@@ -61,6 +61,25 @@ def verify_poll(secret: str, device_id: str, ts: Optional[int], signature: Optio
     return True, "ok"
 
 
+def sign_audio(secret: str, ts: int, device_id: str, clip_id: str) -> str:
+    """X-Signature for GET /edge/audio/<clip_id>: hex(HMAC_SHA256(secret, ts.device_id.clip_id))."""
+    return _hmac_hex(secret, f"{ts}.{device_id}.{clip_id}".encode())
+
+
+def verify_audio(secret: str, device_id: str, clip_id: str, ts: Optional[int], signature: Optional[str],
+                 now_ms: Optional[int] = None) -> tuple[bool, str]:
+    """The person's voice leaves the laptop only for the Pi that was asked to transcribe it.
+    Each clip is served once, so a fresh signature is enough to stop replays."""
+    if not signature or ts is None:
+        return False, "missing signature"
+    if not hmac.compare_digest(sign_audio(secret, ts, device_id, clip_id), signature):
+        return False, "bad signature"
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if abs(now - ts) > MAX_POLL_AGE_MS:
+        return False, "stale"
+    return True, "ok"
+
+
 def verify_event(secret: str, raw_body: bytes, signature: Optional[str]) -> tuple[bool, str]:
     """Check X-Signature on POST /edge/event.
 

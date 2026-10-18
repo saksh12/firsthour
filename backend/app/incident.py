@@ -19,7 +19,7 @@ from typing import Callable, Optional
 from .comms import format_alert
 from .models import IncidentState as S
 from .models import TriageRecord
-from .triage import QUESTIONS, is_clear_fine, parse_rules
+from .triage import QUESTIONS, carry_forward, is_clear_fine, parse_rules
 from .unlock import UnlockGuard, is_unlock_attempt
 from .voice import ASSISTANT_LINE
 
@@ -47,6 +47,11 @@ def _noop(*_args) -> None:
 
 def _in_thread(fn: Callable[[], None]) -> None:
     threading.Thread(target=fn, daemon=True).start()
+
+
+def _answered(inc: Incident) -> list[str]:
+    """Question keys she said something to: an empty field there is unclear, not unsaid."""
+    return [k for k, a in inc.answers if a.strip()]
 
 
 class IncidentMachine:
@@ -85,6 +90,9 @@ class IncidentMachine:
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
         self._question_heard_at: Optional[float] = None
+        # Speech was recorded and the Pi is transcribing it: hold the silence escalation
+        # until this time. Bounded, so a lost transcript delays escalation but never stops it.
+        self._speech_hold_until: Optional[float] = None
         # Routes call in from worker threads and tick() from the event loop.
         self._lock = threading.RLock()
 
@@ -110,7 +118,9 @@ class IncidentMachine:
             "opened_at_ms": int(inc.opened_at * 1000),  # dashboard runs the clock locally
             "down_s": round(self._clock() - inc.opened_at, 1),
             "current_question": self._current_question(),
+            "question_index": inc.question_index,
             "transcript": [{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
+            "answered": _answered(inc),
             "triage": inc.triage.model_dump(),
         }
 
@@ -144,21 +154,28 @@ class IncidentMachine:
             self._ask()
             return True
 
-    def on_answer(self, text: str) -> None:
+    def on_answer(self, text: str, question_index: Optional[int] = None) -> bool:
+        """question_index: the question a recorded clip answered. A transcript that comes
+        back after the script moved on is dropped, never filed under the next question."""
         with self._lock:
             inc = self.incident
             if not inc or inc.state not in (S.CHECKING, S.ALERTING, S.RESPONDING, S.UNLOCKED):
                 log.info("answer ignored, no open incident")
-                return
+                return False
             if inc.question_index >= len(QUESTIONS):
                 log.info("answer after script finished incident_id=%s", inc.id)
-                return
+                return False
+            if question_index is not None and question_index != inc.question_index:
+                log.info("late answer dropped: recorded for question %d, now at %d incident_id=%s",
+                         question_index, inc.question_index, inc.id)
+                return False
+            self._speech_hold_until = None
             key = QUESTIONS[inc.question_index][0]
             inc.answers.append((key, text))
 
             if inc.state == S.CHECKING and is_clear_fine(text):
                 self._finish(S.CANCELLED, "person said fine")
-                return
+                return True
 
             inc.question_index += 1
             answers = list(inc.answers)
@@ -168,25 +185,45 @@ class IncidentMachine:
             if inc.state == S.CHECKING:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
             self._ask()
-            # One StepFun call per incident at a time: answers come every 2-3 s and a call
-            # takes 5-13 s, so the running one picks up whatever arrived meanwhile.
+            # One StepFun call per incident at a time: answers come every 2-10 s and a call
+            # takes 5-38 s, so the running one picks up whatever arrived meanwhile.
             start, inc.refining = not inc.refining, True
 
         # StepFun takes seconds; the caller (and the person's next answer) never waits on it.
         if start:
             self._background(lambda: self._refine(inc))
+        return True
+
+    def hold_for_speech(self, seconds: float) -> None:
+        """A clip with sound in it is being transcribed on the Pi: don't call it silence yet."""
+        with self._lock:
+            if self.incident and self.incident.state == S.CHECKING:
+                self._speech_hold_until = self._clock() + seconds
+                log.info("silence timer held up to %.0f s for speech-to-text incident_id=%s",
+                         seconds, self.incident.id)
+
+    def release_speech_hold(self) -> None:
+        """The transcript came back with no words: silence is silence again."""
+        with self._lock:
+            self._speech_hold_until = None
 
     def _refine(self, inc: Incident) -> None:
         try:
             while True:
                 with self._lock:
                     answers = list(inc.answers)
-                triage = self._triage_fn(answers, self.profile)  # StepFun: up to 15 s, then rules
+                triage = self._triage_fn(answers, self.profile)  # StepFun: up to 45 s, then rules
                 with self._lock:
                     if self.incident is not inc:
                         return  # the incident ended while the model was thinking
                     if len(inc.answers) != len(answers):
-                        continue  # stale: run once more on the latest answers
+                        # Stale, and with live speech nearly every call is: keep what it learned,
+                        # then run once more on the latest answers.
+                        carried = carry_forward(triage, parse_rules(list(inc.answers), self.profile))
+                        if carried != inc.triage:
+                            inc.triage = carried
+                            self._emit_triage(inc)
+                        continue
                     inc.refining = False
                     if triage != inc.triage:
                         inc.triage = triage
@@ -254,9 +291,13 @@ class IncidentMachine:
         """The voice finished playing `text`. Starts the silence timer for the current question."""
         with self._lock:
             inc = self.incident
-            if (inc and inc.state == S.CHECKING and self._question_heard_at is None
-                    and text == self._current_question()):
+            if not inc or text != self._current_question():
+                return
+            if inc.state == S.CHECKING and self._question_heard_at is None:
                 self._question_heard_at = self._clock()
+            # The dashboard starts recording the answer only now, so it never hears the question.
+            self._emit("question_played", {"incident_id": inc.id, "question_index": inc.question_index,
+                                           "question": text})
 
     def tick(self) -> None:
         """Called a few times per second by the backend loop."""
@@ -268,7 +309,12 @@ class IncidentMachine:
             heard_at = self._question_heard_at
             if heard_at is None:
                 heard_at = self._question_asked_at + self.playback_grace_s
-            if inc.state == S.CHECKING and now - heard_at >= self.silence_s:
+            held = self._speech_hold_until is not None and now < self._speech_hold_until
+            if inc.state == S.CHECKING and now - heard_at >= self.silence_s and not held:
+                if self._speech_hold_until is not None:
+                    log.warning("speech-to-text gave no answer in time; treating it as silence incident_id=%s",
+                                inc.id)
+                    self._speech_hold_until = None
                 if self._question_heard_at is not None:
                     log.info("silence timer: question finished playing %.1f s after it was queued, "
                              "then %.1f s of silence before escalating (timer started at playback end) "
@@ -295,6 +341,7 @@ class IncidentMachine:
 
     def _ask(self) -> None:
         q = self._current_question()
+        self._speech_hold_until = None
         if q:
             self._question_asked_at, self._question_heard_at = self._clock(), None
             self._speak(q)
@@ -302,6 +349,7 @@ class IncidentMachine:
     def _emit_triage(self, inc: Incident) -> None:
         self._emit("triage_update", {"incident_id": inc.id, "triage": inc.triage.model_dump(),
                                      "transcript": [a for _, a in inc.answers],
+                                     "answered": _answered(inc),
                                      "current_question": self._current_question()})
 
     def _escalate(self, reason: str) -> None:

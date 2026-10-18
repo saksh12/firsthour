@@ -7,6 +7,39 @@ steps, current test ports, signed reset and physical RST behavior.
 
 ## Where we are
 
+### Current: QNX AI module live (#22, Sun Oct 18)
+
+Branch `edge/box3-voice`. The Pi now transcribes the person's spoken answers
+with `whisper.cpp` from oss.qnx.com (`IMPLEMENTATION.md` 6.8). The mic is on
+the Mac (AirPods; the Brio mic fails in QNX `io-snd`): the dashboard records
+each answer, the backend queues a signed `transcribe`, the Pi fetches the clip
+once with a signed request and posts `speech_text`. Only a clear "I'm fine"
+cancels. Words are never logged.
+
+- Pi: one reader started per `connect.md` with
+  `WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin`. It runs a
+  resident `whisper-server` on `127.0.0.1:8090` at priority 8 with 3 threads.
+  SIGTERM to the reader now stops the server too (verified live).
+- Models on the Pi: tiny.en, base.en (demo), small.en-q8_0 (sha256 checked).
+  Comparison table in `edge/README.md`. base.en live: whisper 2.7-3.1 s,
+  upload to answer applied 3.8-4.3 s.
+- Backend on port 8002, launched with `STUB_ELEVENLABS=0 STUB_STEPFUN=0 PI_STT=1`
+  (Photon still stubbed). ElevenLabs stock voice played every line in three knock runs.
+- StepFun: rules always win; the model may only add `head_strike=true`,
+  `can_move=false` or `bleeding=true` (`merge_model`). Results that arrive after
+  newer answers are not dropped; their worrying findings carry forward
+  (`carry_forward`). Measured 5-38 s on `low`; `max_tokens` 2000 ran out on
+  reasoning, so it is 5000 with a 45 s timeout.
+- Dashboard shows "Unclear" for a question that was answered but not parsed,
+  and "Not said" for one never answered.
+- Start a run with a knock on the table, not BOOT: BOOT sends `help_button` and
+  skips the first question.
+
+Not checked live: an all-silent recording with Pi speech-to-text (unit-tested).
+Known gap: hedged amounts like "a little, not very much" stay Unclear unless
+StepFun answers before the incident ends. Next: split the Pi safety node into
+separate QNX processes (#22 step 1) on its own branch.
+
 ### Current: recover after BOX RST and keep the reader independent of SSH
 
 Branch `edge/box3-usb-recovery`. PRs #33 and #34 are merged into main.

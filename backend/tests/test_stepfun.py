@@ -9,7 +9,7 @@ import pytest
 
 from app.main import create_app
 from app.profile import DEMO_PROFILE
-from app.triage import QUESTIONS, StepFun, parse_rules
+from app.triage import QUESTIONS, StepFun, parse_rules, summarize
 from conftest import CAREGIVER, LaptopClient
 from test_api import post_event, settings
 
@@ -220,9 +220,12 @@ def test_rewrite_error_and_stub_return_original():
 # --- wired into the app -------------------------------------------------------------
 
 def test_app_uses_stepfun_for_triage_and_reply():
+    # Consistent with the one answer given, so the model's summary is kept.
+    only_help = {**GOOD, "head_strike": None, "pain_location": None}
+
     def transport(url, headers, body, timeout):
         system = body["messages"][0]["content"]
-        content = json.dumps(GOOD) if "JSON record" in system else "Help is on the way."
+        content = json.dumps(only_help) if "JSON record" in system else "Help is on the way."
         return {"choices": [{"message": {"content": content}}]}
 
     c = LaptopClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
@@ -248,3 +251,60 @@ def test_app_default_is_rules_only():
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help, I can't move"}).json()
     assert snap["triage"]["can_move"] is False
+# --- the model may add worry, never reassurance ---------------------------------
+
+HEDGED = [("ok", "I need help"), ("head", "I did hit my head"), ("pain", "it hurts a lot in my legs"),
+          ("move", "not really"), ("bleeding", "not exactly")]
+
+
+def test_a_hedge_never_becomes_a_reassuring_no():
+    """Measured live: step-5-preview read "not exactly" (bleeding) as false, "denies bleeding"."""
+    model = {"conscious": True, "head_strike": True, "pain_location": "legs", "can_move": False,
+             "bleeding": False, "summary": "Hit head, leg pain, cannot move, denies bleeding."}
+    rec = sf(FakeTransport(model)).triage(HEDGED, DEMO_PROFILE)
+    assert rec.bleeding is None
+    assert rec.summary == summarize(rec) and "bleeding" not in rec.summary.lower()
+    assert rec.pain_location == "legs" and rec.head_strike is True and rec.on_blood_thinner is True
+
+
+def test_a_clear_rule_answer_beats_a_model_null():
+    model = {"conscious": True, "head_strike": True, "pain_location": "legs", "can_move": None,
+             "bleeding": None, "summary": "Hit head, leg pain."}
+    rec = sf(FakeTransport(model)).triage(HEDGED, DEMO_PROFILE)
+    assert rec.can_move is False  # "not really"
+
+
+def test_the_model_may_add_a_worrying_answer_the_rules_missed():
+    answers = [("ok", "help"), ("head", "my head smacked the tub")]
+    assert parse_rules(answers, DEMO_PROFILE).head_strike is None
+    model = {"conscious": True, "head_strike": True, "pain_location": None, "can_move": None,
+             "bleeding": None, "summary": "Needs help. Hit head on the tub."}
+    rec = sf(FakeTransport(model)).triage(answers, DEMO_PROFILE)
+    assert rec.head_strike is True and rec.summary == model["summary"]
+
+
+def test_the_model_never_contradicts_a_clear_rule_answer():
+    answers = [("ok", "help"), ("head", "yes I did")]
+    model = {"conscious": True, "head_strike": False, "pain_location": None, "can_move": None,
+             "bleeding": None, "summary": "Needs help. No head strike."}
+    rec = sf(FakeTransport(model)).triage(answers, DEMO_PROFILE)
+    assert rec.head_strike is True and "No head strike" not in rec.summary
+
+
+def test_triage_leaves_room_for_long_reasoning():
+    """Measured: unclear answers took up to 3593 tokens and 38 s; at 2000 tokens the reply was empty."""
+    t = FakeTransport(GOOD)
+    StepFun(api_key="k", base_url="https://x/v1", stub=False, transport=t).triage(ANSWERS, DEMO_PROFILE)
+    assert t.calls[0][3] == 45.0
+    assert t.calls[0][2]["max_tokens"] >= 4000
+    assert "not exactly" in t.calls[0][2]["messages"][0]["content"]
+
+
+def test_dashboard_can_tell_unclear_from_unsaid():
+    c = LaptopClient(create_app(settings()))
+    post_event(c)
+    c.post("/person/answer", json={"text": "I need help"})
+    snap = c.post("/person/answer", json={"text": "not exactly"}).json()
+    assert snap["answered"] == ["ok", "head"] and snap["triage"]["head_strike"] is None
+    ev = [e for e in c.app.state.events if e.type == "triage_update"][-1]
+    assert ev.data["answered"] == ["ok", "head"]

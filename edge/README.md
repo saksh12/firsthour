@@ -29,6 +29,37 @@ automatic relock and signed commands. Provisional same-table bottle-demo
 thresholds are loaded on the Pi; full calibration remains pending. See
 `calibration/README.md` for the measurements and limits.
 
+### Speech-to-text with whisper.cpp (QNX AI module)
+
+The Pi transcribes the person's spoken answers with `whisper.cpp` from
+oss.qnx.com (IMPLEMENTATION.md 6.8). The microphone is on the laptop; the Pi
+fetches each clip with a signed request and posts the text as `speech_text`.
+
+```bash
+sudo apk add whisper.cpp
+# models: ggml-base.en.bin (demo), ggml-tiny.en.bin and ggml-small.en-q8_0.bin are in /data/home/qnxuser/fh-models/ on the demo Pi
+sudo sh -c 'WHISPER_MODEL=/data/home/qnxuser/fh-models/ggml-base.en.bin /data/home/qnxuser/fh-venv/bin/python edge/sensor_node.py --usb --backend http://<mac-hotspot-ip>:8002'
+```
+
+The reader keeps one `whisper-server` on `127.0.0.1:8090` (never reachable from
+the network) at QNX priority 8, below the reader's 10, with 3 threads. It falls
+back to `whisper-cli` while the server loads or after it dies. Transcription
+runs on its own thread with a 10 s timeout; the sensor loop never waits on it.
+The words are not logged. With 4 threads instead of 3, decoding stalled at
+272 ms per token (9.5 ms with 3).
+
+Model choice, measured on the Pi 5 with the warm server, 3 threads, beam 5:
+
+| Model | Synthetic `say` clips | Live AirPods clips (up to 8 s) |
+| --- | --- | --- |
+| `ggml-tiny.en` | 1.2-1.7 s (one 4.7 s outlier) | 1.16-1.55 s per clip |
+| `ggml-base.en` (demo) | 2.7-3.6 s | 2.7-3.1 s per clip; clip upload to answer applied 3.8-4.3 s |
+| `ggml-small.en-q8_0` | 3.8-5.2 s, misheard "I need help" as "I need health" | not run |
+
+`base.en` is the demo model: its live transcripts were accurate in a noisy room
+and it stays well inside the 10 s timeout. Switch models by changing
+`WHISPER_MODEL` and restarting the reader.
+
 ### Recover after a BOX reset
 
 QNX libusb can abort on physical BOX-3 RST. Live `--usb` isolates USB access in

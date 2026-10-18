@@ -38,8 +38,9 @@ QUESTIONS: list[tuple[str, str]] = [
 QUESTION_TEXT = dict(QUESTIONS)
 
 BODY_PARTS = [
-    "head", "neck", "shoulder", "arm", "elbow", "wrist", "hand", "chest",
-    "back", "hip", "leg", "knee", "ankle", "foot", "side", "stomach",
+    "head", "jawline", "jaw", "face", "neck", "collarbone", "shoulder", "arm", "elbow", "wrist",
+    "hand", "finger", "chest", "rib", "back", "spine", "tailbone", "hip", "pelvis", "side",
+    "stomach", "leg", "thigh", "knee", "shin", "ankle", "foot", "toe",
 ]
 
 _UNSURE = re.compile(
@@ -190,6 +191,7 @@ Rules:
 - Output ONLY a JSON object with keys: conscious, head_strike, pain_location, can_move, bleeding, summary.
 - conscious, head_strike, can_move, bleeding are true, false or null. pain_location is a short body part or null.
 - Use null when the answers do not say. Never guess or invent.
+- A hedge or partial answer ("not exactly", "sort of", "kind of") is null, not false.
 - Do not give medical advice or diagnoses.
 - summary: one plain sentence for a paramedic, using only what was said."""
 
@@ -226,6 +228,46 @@ class ModelTriage(BaseModel):
     summary: str = Field(min_length=1, max_length=300)
 
 
+# The answer that means "worse" for each yes/no field. Measured Oct 18: step-5-preview turned
+# "not exactly" to "Are you bleeding anywhere?" into bleeding=false, "denies bleeding".
+_WORRYING = {"head_strike": True, "can_move": False, "bleeding": True}
+
+
+def merge_model(rules: TriageRecord, m: "ModelTriage") -> tuple[TriageRecord, list[str]]:
+    """The model may add detail and worrying answers, never a reassuring one the rules didn't hear.
+
+    A clear rule answer always wins. Where the rules found nothing, only the worrying value is
+    taken from the model. If any field differs from the model's, its summary (which says what the
+    model thought) is replaced by the templated one. Returns (record, fields the rules kept)."""
+    fields, kept = {}, []
+    for f, worrying in _WORRYING.items():
+        r, v = getattr(rules, f), getattr(m, f)
+        fields[f] = r if r is not None else (v if v == worrying else None)
+        if fields[f] != v:
+            kept.append(f)
+    fields["pain_location"] = m.pain_location or rules.pain_location
+    if fields["pain_location"] != m.pain_location:
+        kept.append("pain_location")
+    if rules.conscious != m.conscious:  # answering at all is the only evidence either way
+        kept.append("conscious")
+    rec = rules.model_copy(update=fields)  # profile and script fields never come from the model
+    rec.summary = summarize(rec) if kept else m.summary
+    return rec, kept
+
+
+def carry_forward(older: TriageRecord, rules: TriageRecord) -> TriageRecord:
+    """A refinement that finished after newer answers arrived: keep what it learned under the
+    same rules as merge_model, on top of the rule record for the latest answers. Its summary
+    predates those answers, so the templated one is used."""
+    fields = {f: getattr(rules, f) if getattr(rules, f) is not None
+              else (getattr(older, f) if getattr(older, f) == worrying else None)
+              for f, worrying in _WORRYING.items()}
+    fields["pain_location"] = older.pain_location or rules.pain_location
+    rec = rules.model_copy(update=fields)
+    rec.summary = summarize(rec)
+    return rec
+
+
 class StepFunError(Exception):
     pass
 
@@ -244,7 +286,7 @@ def _strip_fences(text: str) -> str:
 
 class StepFun:
     def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
-                 stub: bool = True, timeout_s: float = 3.0, triage_timeout_s: float = 15.0,
+                 stub: bool = True, timeout_s: float = 3.0, triage_timeout_s: float = 45.0,
                  transport: Transport = urllib_transport):
         self.enabled = not stub and bool(api_key) and bool(base_url)
         if not stub and not self.enabled:
@@ -252,8 +294,9 @@ class StepFun:
         self.api_key, self.model = api_key, model
         self.url = base_url.rstrip("/") + "/chat/completions"
         # Rewrite is spoken to the person, so it keeps a tight deadline. Triage runs in the
-        # background after the instant rule-based record (measured 5-13 s on low effort; it
-        # reasons through extraction whatever the prompt says).
+        # background after the instant rule-based record (measured 5-38 s on low effort, the
+        # lowest level; it reasons through extraction whatever the prompt says, longest on
+        # unclear answers).
         self.timeout_s, self.triage_timeout_s = timeout_s, triage_timeout_s
         self._transport = transport
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
@@ -295,7 +338,9 @@ class StepFun:
             return rules
         t0 = time.monotonic()
         try:
-            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=2000,
+            # Reasoning counts against max_tokens. Measured Oct 18: unclear answers took up to
+            # 3593 tokens; at 2000 the answer came back empty (finish_reason=length).
+            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=5000,
                                  timeout_s=self.triage_timeout_s)
             try:
                 raw = json.loads(_strip_fences(content))
@@ -311,13 +356,10 @@ class StepFun:
             self._log("triage", t0, False, str(e))
             return rules
         self._log("triage", t0, True, None)
-        return TriageRecord(
-            conscious=m.conscious, head_strike=m.head_strike, pain_location=m.pain_location,
-            can_move=m.can_move, bleeding=m.bleeding, summary=m.summary,
-            # Never from the model:
-            on_blood_thinner=profile.get("on_blood_thinner"),
-            next_question=rules.next_question, done=rules.done,
-        )
+        rec, kept = merge_model(rules, m)
+        if kept:
+            log.info("stepfun triage: rules kept for fields=%s", ",".join(kept))
+        return rec
 
     def rewrite(self, text: str) -> str:
         if not self.enabled or not text.strip():
