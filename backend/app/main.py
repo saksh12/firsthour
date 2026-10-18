@@ -294,6 +294,30 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
 
+    # (device_id, incident_id) -> when an alarm_off was last re-sent for it.
+    alarm_off_resent: dict[tuple[str, str], float] = {}
+    ALARM_OFF_RESEND_S = 10
+
+    def resend_alarm_off(device_id: str, local_incident_id: str) -> None:
+        """A heartbeat says the device is still alarming for an incident this backend already
+        closed: its alarm_off was lost (seen Oct 18: the Pi's safety process restarted mid-incident
+        and refused the command as signed before the restart). Queue a fresh one, at most every
+        ALARM_OFF_RESEND_S; the Pi still verifies it against its own open incident."""
+        inc = machine.incident
+        if (inc and inc.id == local_incident_id) or not machine.was_closed(local_incident_id):
+            return
+        now = time.time()
+        key = (device_id, local_incident_id)
+        if now - alarm_off_resent.get(key, 0.0) < ALARM_OFF_RESEND_S:
+            return
+        if any(c.action == "alarm_off" and c.incident_id == local_incident_id for c in queues[device_id]):
+            return  # one is already waiting for the next poll
+        alarm_off_resent[key] = now
+        cmd = make_command(secret, "alarm_off", local_incident_id)
+        queues[device_id].append(cmd)
+        log.warning("command queued action=alarm_off incident_id=%s device_id=%s id=%s "
+                    "reason=device still reports a closed incident", local_incident_id, device_id, cmd.id)
+
     def on_close(inc, final) -> None:
         voice.flush()  # leftover questions must not play after "I'm fine" or a resolve
         undelivered.clear()
@@ -421,6 +445,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             log.warning("edge event rejected reason=malformed errors=%d", e.error_count())
             raise HTTPException(status_code=422, detail="malformed event")
         last_heartbeat[event.device_id] = time.time()
+        if event.type == "heartbeat" and event.local_incident_id:
+            resend_alarm_off(event.device_id, event.local_incident_id)
         if event.type != "heartbeat":
             log.info("edge event type=%s device_id=%s local_incident_id=%s",
                      event.type, event.device_id, event.local_incident_id)
@@ -433,7 +459,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                 edge_to_backend_ms=int(time.time() * 1000) - event.ts):
                 pass
         elif event.type == "help_button":
-            machine.on_help_button()
+            machine.on_help_button(event.device_id)
         elif event.type == "cancelled":
             machine.cancel("cancelled on device")
         elif event.type == "speech_text" and event.speech:

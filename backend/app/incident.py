@@ -133,6 +133,10 @@ class IncidentMachine:
         # listening mic (PI_STT): with typed answers the operator sets the pace.
         self.reask = reask
         self.incident: Optional[Incident] = None
+        # Ids of incidents this machine closed, newest last. Outbox delivery from the Pi is
+        # at-least-once (seen Oct 18: a fall_suspected delivered again after its uplink
+        # process restarted), so a closed id must never open a second incident.
+        self._closed: dict[str, float] = {}
         self._question_asked_at = 0.0
         self._question_heard_at: Optional[float] = None
         # Speech was recorded and the Pi is transcribing it: hold the silence escalation
@@ -177,12 +181,20 @@ class IncidentMachine:
         with self._lock:
             return self._facts(self.incident) if self.incident else None
 
+    def was_closed(self, incident_id: str) -> bool:
+        """True for an incident this machine ended (cancelled, resolved or superseded)."""
+        with self._lock:
+            return incident_id in self._closed
+
     # --- inputs -------------------------------------------------------------
 
     def on_fall(self, device_id: str, incident_id: str, ts_ms: Optional[int] = None) -> bool:
         """ts_ms: when the Pi detected the fall, so a fall replayed from its offline
         outbox keeps its real time down. Ignored if the Pi's clock looks wrong."""
         with self._lock:
+            if incident_id in self._closed:
+                log.info("fall ignored, incident already closed (delivered again) incident_id=%s", incident_id)
+                return False
             inc = self.incident
             if inc and (inc.id == incident_id or inc.device_id != device_id):
                 log.info("fall ignored, incident already open incident_id=%s", inc.id)
@@ -289,8 +301,14 @@ class IncidentMachine:
             with self._lock:
                 inc.refining = False
 
-    def on_help_button(self) -> None:
+    def on_help_button(self, device_id: Optional[str] = None) -> None:
+        """device_id: the node whose button was pressed; another node's button never
+        escalates this incident."""
         with self._lock:
+            inc = self.incident
+            if inc and device_id is not None and inc.device_id != device_id:
+                log.info("help button from another device ignored device_id=%s incident_id=%s", device_id, inc.id)
+                return
             if self.incident and self.incident.state == S.CHECKING:
                 self.incident.question_index = max(self.incident.question_index, 1)
                 self._escalate("help button")
@@ -335,7 +353,7 @@ class IncidentMachine:
                     self._send_text(inc.id, [sender], answer, "answer")
                     return {"type": "question", "accepted": True}
 
-        spoken = self._rewrite_fn(text)  # StepFun: up to 3 s, then the original text
+        spoken = self._rewrite_fn(text)  # StepFun: up to its rewrite deadline (10 s), then the original text
 
         with self._lock:
             if self.incident is not inc:
@@ -595,6 +613,9 @@ class IncidentMachine:
     def _finish(self, final: S, reason: str) -> None:
         self._set(final, reason)
         self.guard.close_incident()
+        self._closed[self.incident.id] = self._clock()
+        while len(self._closed) > 50:
+            del self._closed[next(iter(self._closed))]
         # Tell the Pi before forgetting the incident: its buzzer and clock stay up
         # until this alarm_off (or a demo reset), never on a timer.
         self._on_close(self.incident, final)

@@ -242,6 +242,38 @@ def test_help_button_escalates(client):
     assert client.get("/incident").json()["state"] == "ALERTING"
 
 
+def test_fall_delivered_again_after_cancel_does_not_reopen(client):
+    post_event(client)
+    client.post("/person/answer", json={"text": "I'm fine"})
+    r = post_event(client).json()  # the Pi's outbox retried the same event
+    assert r == {"ok": True, "incident_id": None, "state": "IDLE"}
+    assert client.get("/comms/stub/outbox").json() == {"messages": []}
+
+
+def test_heartbeat_still_naming_a_closed_incident_gets_a_fresh_alarm_off(client):
+    """The Pi's safety process restarted and refused the original alarm_off (signed before its
+    restart); its heartbeats keep reporting the incident, so it would alarm until someone
+    restarted it. The backend re-sends a fresh alarm_off, at most every 10 s."""
+    post_event(client)
+    client.post("/person/answer", json={"text": "I'm fine"})
+    assert [c["action"] for c in signed_poll(client).json()["commands"]] == ["alarm_off"]
+    post_event(client, "heartbeat", ts=TS)  # local_incident_id is still bath-01-TS
+    cmds = signed_poll(client).json()["commands"]
+    assert [(c["action"], c["incident_id"]) for c in cmds] == [("alarm_off", f"bath-01-{TS}")]
+    assert CommandVerifier(SECRET).check(cmds[0], local_incident_id=f"bath-01-{TS}") == (True, "ok")
+    post_event(client, "heartbeat", ts=TS)  # a second heartbeat right after: not spammed
+    assert signed_poll(client).json() == {"commands": []}
+
+
+def test_heartbeat_for_an_unknown_or_open_incident_queues_nothing(client):
+    post_event(client, "heartbeat", ts=TS + 7)  # an id this backend never saw (e.g. it restarted)
+    assert signed_poll(client).json() == {"commands": []}
+    post_event(client)
+    post_event(client, "heartbeat", ts=TS)  # the open incident itself
+    assert signed_poll(client).json() == {"commands": []}
+    assert client.get("/incident").json()["state"] == "CHECKING"
+
+
 def test_missing_secret_refuses_to_start():
     with pytest.raises(RuntimeError):
         create_app(settings(SHARED_SECRET=""))
