@@ -26,7 +26,10 @@ def test_parse_other_kinds(line, kind):
     assert parse_line(line)["kind"] == kind
 
 
-@pytest.mark.parametrize("line", ["", "garbage", "S,1,2,3", "S,a,b,c,d,e,f", "N,04A1B2C3D4", "S,1,2,3,4,5,6,7", "\x00\xff"])
+@pytest.mark.parametrize("line", ["", "garbage", "S,1,2,3", "S,a,b,c,d,e,f", "N,04A1B2C3D4", "S,1,2,3,4,5,6,7", "\x00\xff",
+                                  # the hub prints nan/inf for a failed float read
+                                  "S,1,20,nan,0.01,1.0,120", "S,1,20,inf,0,1,10", "S,1,inf,0,0,1,10",
+                                  "S,1,1e999,0,0,1,10", "S,1,20,0,0,-inf,10", "S,1,20,0,0,1,nan"])
 def test_noise_is_ignored(line):
     assert parse_line(line) is None
 
@@ -38,6 +41,16 @@ def test_accel_delta_is_zero_at_rest_and_jumps_on_impact():
     for _ in range(50):
         assert a.update(0, 0, 1.0) < 0.01
     assert a.update(0.8, 0.5, 2.6) > 1.5
+
+
+def test_accel_delta_never_lets_a_bad_sample_into_the_baseline():
+    a = AccelDelta()
+    for _ in range(50):
+        a.update(0, 0, 1.0)
+    assert a.update(0, 0, float("inf")) == 0.0
+    assert a.update(0, 0, float("nan")) == 0.0
+    assert a.update(0, 0, 1.0) < 0.01       # still at rest afterwards
+    assert a.update(0.8, 0.5, 2.6) > 1.5     # and a real impact still shows
 
 
 def fusion():
