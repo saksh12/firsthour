@@ -29,7 +29,7 @@ from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
-from .telemetry import Telemetry
+from .telemetry import ENVIRONMENT, Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
 from .voice import ASSISTANT_LINE, DEFAULT_MODEL as DEFAULT_VOICE_MODEL, TTS_BASE_URL, Voice, line_ref
@@ -437,6 +437,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         alive = any(age <= HEARTBEAT_STALE_S for age in devices.values())
         body = {"ok": alive, "edge": "live", "heartbeat_age_s": devices}
         return JSONResponse(body, status_code=200 if alive else 503, headers=no_cache)
+
+    @app.get("/config/public")
+    def config_public():
+        """Browser config for the dashboard, a static page that can't read .env. Only what is
+        safe to publish: a Sentry DSN only lets a client send events, so Sentry treats it as
+        public. Nothing else from the environment, ever. Not reachable through the tunnel."""
+        return JSONResponse({"sentry_dsn": s.get("SENTRY_DSN") or None, "environment": ENVIRONMENT},
+                            headers={"Cache-Control": "no-store"})
 
     @app.post("/edge/event")
     async def edge_event(request: Request):

@@ -1068,6 +1068,37 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   render();
   setInterval(() => { renderClock(); renderDoor(); }, 250);
   connect();
+
+  // Session Replay, all text masked and media blocked, only when the backend has a Sentry DSN.
+  // Optional: offline Wi-Fi, a blocked CDN or no DSN just means no replay. Errors-plus-replay
+  // bundle, so no browser tracing; console breadcrumbs off so nothing the page logs leaves it.
+  const SENTRY_BUNDLE = "https://browser.sentry-cdn.com/11.8.0/bundle.replay.min.js";
+  const SENTRY_SRI = "sha384-P2vfZ7rTolY6vK1eqWzRAvqyUhs/CXIIe+iWFf4u9Paw6S/M7L9TVzeigTXJs4RF";
+  (async () => {
+    try {
+      const r = await fetch(backend + "/config/public", { cache: "no-store" });
+      const { sentry_dsn: dsn, environment } = r.ok ? await r.json() : {};
+      if (!dsn) return;
+      const tag = document.createElement("script");
+      tag.src = SENTRY_BUNDLE;
+      tag.integrity = SENTRY_SRI;
+      tag.crossOrigin = "anonymous";
+      tag.async = true;
+      tag.onload = () => {
+        try {
+          window.Sentry.init({
+            dsn, environment, sendDefaultPii: false,
+            replaysSessionSampleRate: 1.0, replaysOnErrorSampleRate: 1.0,
+            integrations: [
+              window.Sentry.replayIntegration({ maskAllText: true, maskAllInputs: true, blockAllMedia: true }),
+              window.Sentry.breadcrumbsIntegration({ console: false }),
+            ],
+          });
+        } catch (e) { /* replay is optional */ }
+      };
+      document.head.appendChild(tag);
+    } catch (e) { /* no backend yet or offline: no replay */ }
+  })();
 })();
 </script>
 </body>

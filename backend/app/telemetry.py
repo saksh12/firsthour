@@ -13,6 +13,8 @@ Products used beyond error monitoring:
   StepFun latency) is sent as a Sentry log.
 - Uptime Monitoring: point a monitor at the tunneled GET/HEAD /health, which is 503
   when the Pi hasn't sent a heartbeat in 30 s (STUB_EDGE=0).
+- Session Replay: the dashboard loads the browser SDK itself (GET /config/public gives it
+  the DSN), with all text masked and media blocked.
 
 No DSN = every method is a cheap no-op. Privacy: send_default_pii=False, request
 bodies are never attached (a caregiver's reply can contain the unlock code), a

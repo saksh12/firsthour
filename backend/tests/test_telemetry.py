@@ -279,3 +279,26 @@ def test_stepfun_calls_are_gen_ai_spans_with_token_usage_and_no_text(cap):
     everything = cap.raw()
     for private in ("my hip", "hang tight", "Help is on the way", "Needs help."):
         assert private not in everything, private
+
+
+# --- browser config for the dashboard's Session Replay ---------------------------------------
+
+def test_public_config_gives_the_dsn_and_nothing_else(cap):
+    c = app_with(cap, STEPFUN_API_KEY="sk-secret", ELEVENLABS_API_KEY="el-secret")
+    r = c.get("/config/public", headers={"Origin": "http://localhost:5173"})
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    assert r.json() == {"sentry_dsn": FAKE_DSN, "environment": "hackathon"}
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "secret" not in r.text and SECRET not in r.text
+
+
+def test_public_config_without_a_dsn_turns_replay_off():
+    c = LaptopClient(create_app(settings()))
+    assert c.get("/config/public").json() == {"sentry_dsn": None, "environment": "hackathon"}
+
+
+def test_public_config_is_not_reachable_through_the_tunnel(cap):
+    c = app_with(cap)
+    for via in ({"X-Forwarded-For": "203.0.113.7"}, {"Cf-Connecting-IP": "203.0.113.7"}):
+        r = c.get("/config/public", headers=via)
+        assert r.status_code == 404 and FAKE_DSN not in r.text
