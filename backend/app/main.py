@@ -26,8 +26,9 @@ from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import make_command, verify_event
 from .telemetry import Telemetry
-from .triage import StepFun, urllib_transport
+from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
+from .voice import ASSISTANT_LINE, DEFAULT_MODEL as DEFAULT_VOICE_MODEL, TTS_BASE_URL, Voice, line_ref
 
 log = logging.getLogger("firsthour.api")
 
@@ -59,6 +60,12 @@ def load_settings() -> dict:
         "STEPFUN_BASE_URL": os.getenv("STEPFUN_BASE_URL", ""),
         "STEPFUN_MODEL": os.getenv("STEPFUN_MODEL", "step-5-preview"),
         "SENTRY_DSN": os.getenv("SENTRY_DSN", ""),
+        "STUB_ELEVENLABS": os.getenv("STUB_ELEVENLABS", "1") == "1",
+        "ELEVENLABS_API_KEY": os.getenv("ELEVENLABS_API_KEY", ""),
+        "ELEVENLABS_VOICE_ID": os.getenv("ELEVENLABS_VOICE_ID", ""),
+        "ELEVENLABS_MODEL": os.getenv("ELEVENLABS_MODEL", ""),
+        "ELEVENLABS_BASE_URL": os.getenv("ELEVENLABS_BASE_URL", ""),
+        "VOICE_PLAYBACK": os.getenv("VOICE_PLAYBACK", "1") == "1",
     }
 
 
@@ -118,9 +125,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             log.warning("dashboard client dropped, queue full")
 
     def speak(text: str) -> None:
-        # TODO(C): voice.py plays cached ElevenLabs audio here.
         spoken.append(text)
-        log.info("say %r", text)
+        # Never log the line: a caregiver's rewritten reply is private.
+        log.info("say ref=%s", line_ref(text))
+        voice.speak(text)
 
     def deliver(incident_id: str, to: list[str], text: str) -> None:
         with telemetry.span(incident_id, "photon_send", stub=False):
@@ -173,6 +181,19 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
+    voice = Voice(
+        # A settings dict that omits the key falls back to the env var (conftest
+        # sets VOICE_PLAYBACK=0 so test apps stay silent); default is on.
+        playback=s.get("VOICE_PLAYBACK", os.getenv("VOICE_PLAYBACK", "1") == "1"),
+        stub=s.get("STUB_ELEVENLABS", True),
+        api_key=s.get("ELEVENLABS_API_KEY", ""), voice_id=s.get("ELEVENLABS_VOICE_ID", ""),
+        model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
+        base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,
+        span=lambda **kw: telemetry.span(current_incident_id(), "voice", **kw),
+        **({"transport": s["VOICE_TRANSPORT"], "player": s["VOICE_PLAYER"]}
+           if "VOICE_TRANSPORT" in s else {}),  # tests only
+    )
+    log.info("voice: %s", "ElevenLabs real" if voice.real else "stub (say/log only)")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
                               emit=emit, on_close=close_on_pi, speak=speak,
                               send_alert=send_alert,
@@ -190,9 +211,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     log.exception("tick failed")
                 await asyncio.sleep(TICK_S)
 
+        # Pre-generate the fixed script so the first question plays with no API call.
+        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE])
         task = asyncio.create_task(ticker())
         yield
         task.cancel()
+        voice.stop()
         loop_ref["loop"] = None
         telemetry.flush()
 
@@ -204,6 +228,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                            allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
         log.info("CORS allowed origins=%s", origins)
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
+    app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
 
     @app.api_route("/health", methods=["GET", "HEAD"])
