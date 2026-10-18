@@ -519,6 +519,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       case "message_out":
         if (d.delivered === false) log("Text NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". An alert goes out when they text the line.");
         else if (d.kind === "alert") log("Alert queued for " + (d.to || []).join(", "));
+        else if (d.kind === "code") log("Door code texted to " + (d.to || []).join(", ") + " (they said they're coming)");
         else log("Texted " + (d.to || []).join(", ") + " (" + d.kind.replace("_", " ") + "): “" + d.text + "”");
         break;
       case "delivery_status":

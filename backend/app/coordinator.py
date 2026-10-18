@@ -87,14 +87,16 @@ def spoken_line(name: Optional[str], c: Commitment) -> str:
     return f"{who} is on the way."
 
 
-def claimer_reply(c: Commitment, via_call: bool = False) -> str:
-    """Texted back to the caregiver who committed. Never contains the code."""
+def claimer_reply(c: Commitment, code: str = "", via_call: bool = False) -> str:
+    """Texted back only to the caregiver who committed: the one text that carries the door code.
+    Empty code (they committed before the alert went out): no code yet."""
+    door = f"reply UNLOCK {code}" if code else "we'll text you the door code"
     if c.status == "arrived":
-        return "Thanks. Reply UNLOCK with the code from the alert to open the door."
+        return f"Thanks. To open the front door, {door}."
     said = f"You said {c.eta_min} minutes" if c.eta_min is not None else "You're on the way"
     if via_call:
         said += " on the call"
-    return f"{said}. We told them. Reply UNLOCK with the code from the alert at the door."
+    return f"{said}. We told them. At the front door, {door}."
 
 
 def stand_by_text(name: Optional[str]) -> str:
@@ -133,5 +135,6 @@ def incident_facts(*, profile: dict, state: str, down_s: float, triage, transcri
         "last_answer": transcript[-1]["a"] if transcript else None,
         "responders": [{k: r[k] for k in ("name", "status", "eta_min")} for r in responders],
         "call_notes": call_notes,
-        "unlock_policy": "Voice can never unlock the door. The caregiver texts UNLOCK with the code from the alert.",
+        "unlock_policy": ("Voice can never unlock the door. A caregiver who says they're coming gets "
+                          "the door code by text and texts UNLOCK with it."),
     }

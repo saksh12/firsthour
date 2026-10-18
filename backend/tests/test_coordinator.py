@@ -1,6 +1,5 @@
 """Caregiver coordination (issue #23): claims, ETAs, backups, Q&A, voice escalation."""
 
-import re
 
 import pytest
 
@@ -88,8 +87,8 @@ def m(clock, rec):
     return mm
 
 
-def code_of(rec) -> str:
-    return re.search(r"UNLOCK (\d{4})", rec.alerts[-1]).group(1)
+def code_of(m) -> str:
+    return m.incident.code
 
 
 def test_first_clear_claim_wins_and_others_stand_by(m, rec):
@@ -98,8 +97,12 @@ def test_first_clear_claim_wins_and_others_stand_by(m, rec):
     assert m.state == S.RESPONDING
     assert rec.spoken[-1] == "Sarah is about 10 minutes away."
     assert ((BACKUP,), "stand_by", "Sarah is on the way. Please stand by; we'll text if that changes.") in rec.texts
-    ack = [t for t in rec.texts if t[1] == "ack"][0]
+    ack = [t for t in rec.texts if t[1] == "code"][0]
     assert ack[0] == (CAREGIVER,) and "You said 10 minutes" in ack[2]
+    assert f"reply UNLOCK {code_of(m)}." in ack[2]
+    # The door code goes only to the caregiver who is coming, never in the alert or the stand-by.
+    assert code_of(m) not in rec.alerts[-1]
+    assert all(code_of(m) not in t for to, kind, t in rec.texts if kind != "code")
     assert [d["status"] for d in rec.of("delivery_status")] == ["acknowledged", "responder_assigned"]
     # A second "on my way" is recorded but doesn't take over.
     r2 = m.caregiver_reply(BACKUP, "I'm coming too")
@@ -132,7 +135,7 @@ def test_question_is_answered_in_thread_not_read_aloud(m, rec):
     assert q == "is she still talking?" and facts["patient"] == "Margaret"
     # The model never sees the code or a phone number.
     blob = repr(facts)
-    assert code_of(rec) not in blob and CAREGIVER not in blob and BACKUP not in blob
+    assert code_of(m) not in blob and CAREGIVER not in blob and BACKUP not in blob
 
 
 def test_model_can_route_a_question_shaped_message_to_read_aloud(clock, rec):
@@ -164,11 +167,11 @@ def test_stranger_cannot_claim_or_ask(m, rec):
 
 def test_unlock_still_only_through_the_guard(m, rec):
     m.caregiver_reply(CAREGIVER, "omw")
-    r = m.caregiver_reply(CAREGIVER, f"UNLOCK {code_of(rec)}")
+    r = m.caregiver_reply(CAREGIVER, f"UNLOCK {code_of(m)}")
     assert r["allowed"] is True and rec.granted == ["inc-1"]
 
 
-def test_no_claim_calls_primary_then_backup(m, rec, clock):
+def test_no_reply_calls_primary_then_backup(m, rec, clock):
     clock.advance(19)
     m.tick()
     assert rec.calls == []
@@ -177,14 +180,30 @@ def test_no_claim_calls_primary_then_backup(m, rec, clock):
     assert [n for n, _ in rec.calls] == [CAREGIVER]
     v = rec.calls[0][1]
     assert v["incident_id"] == "inc-1" and v["on_blood_thinner"] == "yes" and v["eta_question"]
-    assert code_of(rec) not in repr(v)
-    m.caregiver_reply(CAREGIVER, "what happened?")  # a question is not a claim
+    assert code_of(m) not in repr(v)
     clock.advance(20)
     m.tick()
     assert [n for n, _ in rec.calls] == [CAREGIVER, BACKUP]
     clock.advance(60)
     m.tick()
     assert len(rec.calls) == 2  # one call per number
+
+
+def test_any_reply_stops_voice_escalation(m, rec, clock):
+    m.caregiver_reply(CAREGIVER, "what happened?")  # not a claim, but she's engaged
+    clock.advance(60)
+    m.tick()
+    assert rec.calls == []
+
+
+def test_head_strike_call_skipped_once_someone_replied(clock, rec):
+    mm = machine(clock, rec)
+    mm.on_fall("bath-01", "inc-1")
+    mm.on_answer("help")
+    mm.caregiver_reply(BACKUP, "what happened?")
+    mm.on_answer("yes I hit my head")
+    mm.tick()
+    assert rec.calls == []
 
 
 def test_claim_stops_voice_escalation(m, rec, clock):
@@ -217,14 +236,14 @@ def test_call_result_records_commitment_and_texts_back(m, rec):
     r = m.record_call_result("inc-1", CAREGIVER, ["Oh no.", "I'll be there in 5 minutes"], "Sarah will come.")
     assert r["status"] == "arriving" and r["eta_min"] == 5 and r["assigned"]
     assert rec.spoken[-1] == "Sarah is about 5 minutes away."
-    ack = [t for t in rec.texts if t[1] == "ack"][-1]
+    ack = [t for t in rec.texts if t[1] == "code"][-1]
     assert ack[0] == (CAREGIVER,) and ack[2].startswith("You said 5 minutes on the call.")
-    assert "UNLOCK with the code" in ack[2] and code_of(rec) not in ack[2]
+    assert f"reply UNLOCK {code_of(m)}." in ack[2]  # the code is texted after the call, never spoken
     assert m.facts()["call_notes"] == ["Sarah will come."]
 
 
 def test_spoken_unlock_on_a_call_never_unlocks(m, rec):
-    code = code_of(rec)
+    code = code_of(m)
     m.record_call_result("inc-1", CAREGIVER, [f"UNLOCK {code}", f"unlock the door, the code is {code}"], "")
     assert rec.granted == [] and m.state == S.ALERTING
     assert m.guard.audit == []  # not even counted as an attempt
@@ -241,4 +260,4 @@ def test_facts_never_include_code(m, rec):
     f = incident_facts(profile=DEMO_PROFILE, state="ALERTING", down_s=75, triage=m.incident.triage,
                        transcript=[], responders=[], call_notes=[])
     assert f["time_down"] == "1 min 15 s" and "Voice can never unlock" in f["unlock_policy"]
-    assert code_of(rec) not in repr(m.facts())
+    assert code_of(m) not in repr(m.facts())

@@ -57,7 +57,7 @@
         <input id="from" value="+13105550101" />
       </div>
       <div class="quick">
-        <button class="secondary" id="fill-unlock" disabled>UNLOCK (code from alert)</button>
+        <button class="secondary" id="fill-unlock" disabled>UNLOCK (code comes after ON MY WAY)</button>
         <button class="secondary" data-fill="On my way, 5 minutes.">"On my way"</button>
         <button class="secondary" id="as-stranger">Be a stranger</button>
       </div>
@@ -96,7 +96,7 @@
       $("status").className = "status " + (cls || "");
     }
 
-    // The stub inbox is the phone's inbox: it holds the real alert text, code included.
+    // The stub inbox is the phone's inbox: the alert, then the door code once they say they're coming.
     // It 404s when STUB_PHOTON=0, because then the code only goes to the real phone.
     async function pollInbox() {
       try {

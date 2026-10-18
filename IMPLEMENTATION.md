@@ -290,12 +290,14 @@ The Pi **must** check: signature valid, `ts` within 10 seconds, nonce not seen b
 Outbound alert text template:
 
 ```text
-FALL ALERT: Margaret (Bathroom). Down 00:32.
+FirstHour: Margaret has had a fall in the bathroom. Down 00:32.
 Conscious. Right hip pain, cannot move leg. No head strike.
 NOTE: on a blood thinner.
-Reply UNLOCK 4821 to open the front door.
-Or reply with a message and we'll read it to her.
+How soon can you be here? Reply with an ETA like "10 min" or ON MY WAY, and we'll text you the door code.
+Or ask a question, or send a message and we'll read it to her.
 ```
+
+The alert goes to every caregiver, so it carries **no door code**. A caregiver who says they're coming (text, or on the voice call) gets a private reply with the code: `You said 10 minutes. We told them. At the front door, reply UNLOCK 4821.` The dashboard is told a code text went out (`message_out` kind `code`), never its text. If no caregiver replies at all within `VOICE_CALL_AFTER_SECONDS` (20) of the alert, the backend calls them in order; any reply stops the calls.
 
 Inbound grammar: `UNLOCK <4 digits>` unlocks if rules pass. Anything else is a message to read aloud (rewritten to one short calm sentence, max 20 words).
 
@@ -578,7 +580,7 @@ The unlock is the part judges will poke at. Build it carefully and test it hard.
 
 1. **An incident is open** (a fall was confirmed in the last `INCIDENT_WINDOW_SECONDS`).
 2. **Sender is on the allowlist** (`CAREGIVER_NUMBERS`).
-3. **The reply contains the one-time code** from the alert text. A fresh 4-digit code is made for each incident and dies when it ends.
+3. **The reply contains the one-time code**, texted only to a caregiver who said they're coming (never in the first alert). A fresh 4-digit code is made for each incident and dies when it ends.
 4. **Fewer than 3 wrong tries** in this incident.
 5. **The command is signed**, fresh (under 10 seconds), and its nonce is new.
 6. **The Pi agrees**: the command names its own open incident, before it opens the latch.

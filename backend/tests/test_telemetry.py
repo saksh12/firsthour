@@ -54,8 +54,7 @@ def flush():
 
 
 def code_of(c):
-    text = c.get("/comms/stub/outbox").json()["messages"][-1]["text"]
-    return re.search(r"UNLOCK (\d{4})", text).group(1)
+    return c.app.state.machine.incident.code
 
 
 def test_no_dsn_is_a_noop():

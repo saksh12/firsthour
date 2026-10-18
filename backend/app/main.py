@@ -223,8 +223,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                              "status": "failed"})
 
     def send_text(incident_id: str, to: list[str], text: str, kind: str) -> None:
-        """Follow-up texts in the incident thread (answers, acks, stand-by). They never
-        carry the code, so the dashboard may show them."""
+        """Follow-up texts in the incident thread (answers, acks, stand-by, the door code).
+        A "code" text is shown on the dashboard only as sent, never its text."""
         if s["STUB_PHOTON"]:
             outbox.append({"to": to, "incident_id": incident_id, "text": text, "kind": kind,
                            "ts": int(time.time() * 1000)})
@@ -232,7 +232,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                      "stub": True})
         else:
             threading.Thread(target=deliver, args=(incident_id, to, text, kind), daemon=True).start()
-        emit("message_out", {"to": to, "incident_id": incident_id, "kind": kind, "text": text})
+        out = {"to": to, "incident_id": incident_id, "kind": kind}
+        emit("message_out", out if kind == "code" else {**out, "text": text})
 
     # conversation_id -> (incident_id, number) for calls we placed: only those may record a
     # commitment from the post-call webhook.

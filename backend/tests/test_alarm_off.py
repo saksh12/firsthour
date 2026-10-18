@@ -1,7 +1,6 @@
 """When the backend incident ends (CANCELLED or RESOLVED), the Pi gets a signed alarm_off."""
 
 import json
-import re
 
 import pytest
 
@@ -77,8 +76,7 @@ def poll(client):
 def escalate(client):
     post_event(client)
     client.post("/person/answer", json={"text": "help"})
-    text = client.get("/comms/stub/outbox").json()["messages"][-1]["text"]
-    return re.search(r"UNLOCK (\d{4})", text).group(1)
+    return client.app.state.machine.incident.code
 
 
 def test_resolve_sends_signed_alarm_off_the_pi_accepts(client):

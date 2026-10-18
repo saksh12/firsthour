@@ -1,6 +1,5 @@
 """State machine (IMPLEMENTATION.md section 6.4)."""
 
-import re
 import time
 
 import pytest
@@ -40,10 +39,6 @@ def m(clock, rec):
     )
 
 
-def code_from(alert: str) -> str:
-    return re.search(r"UNLOCK (\d{4})", alert).group(1)
-
-
 def test_starts_idle(m):
     assert m.state == S.IDLE and m.snapshot()["state"] == "IDLE"
 
@@ -70,9 +65,11 @@ def test_help_escalates_and_sends_alert_with_triage(m, rec):
     assert m.state == S.ALERTING
     assert len(rec.alerts) == 1
     alert = rec.alerts[0]
-    assert alert.startswith("FALL ALERT: Margaret (Bathroom). Down 00:00.")
+    assert alert.startswith("FirstHour: Margaret has had a fall in the bathroom. Down 00:00.")
     assert "Cannot move." in alert and "NOTE: on a blood thinner." in alert
-    assert re.search(r"Reply UNLOCK \d{4} to open the front door\.", alert)
+    assert "How soon can you be here?" in alert
+    # Every caregiver gets the alert, so it never carries the door code.
+    assert "UNLOCK" not in alert and m.incident.code not in alert
     assert rec.spoken[-1] == QUESTIONS[1][1]
 
 
@@ -144,7 +141,7 @@ def test_new_fall_from_the_pi_supersedes_the_stale_incident(m, rec):
     m._on_close = lambda inc, final: closed.append((inc.id, final))
     m.on_fall("bath-01", "inc-1")
     m.on_answer("help")
-    code = code_from(rec.alerts[0])
+    code = m.incident.code  # texted only to a caregiver who commits
     assert m.on_fall("bath-01", "inc-2")
     assert m.incident.id == "inc-2" and m.state == S.CHECKING
     assert closed == [("inc-1", S.RESOLVED)]
@@ -194,7 +191,7 @@ def test_stranger_message_is_dropped_and_not_read_aloud(m, rec):
 def test_unlock_flow_and_relock_after_hold(m, clock, rec):
     m.on_fall("bath-01", "inc-1")
     m.on_answer("help")
-    code = code_from(rec.alerts[0])
+    code = m.incident.code  # texted only to a caregiver who commits
 
     assert m.caregiver_reply(STRANGER, f"UNLOCK {code}")["reason"] == "not enrolled"
     assert m.state == S.ALERTING and rec.granted == []
@@ -221,7 +218,7 @@ def test_no_unlock_during_checking(m):
 def test_resolve_closes_the_unlock_window(m, rec):
     m.on_fall("bath-01", "inc-1")
     m.on_answer("help")
-    code = code_from(rec.alerts[0])
+    code = m.incident.code  # texted only to a caregiver who commits
     assert m.resolve()
     assert m.state == S.IDLE
     assert rec.states()[-2:] == ["RESOLVED", "IDLE"]
@@ -238,7 +235,7 @@ def test_snapshot_never_contains_the_code(m, rec, monkeypatch):
     monkeypatch.setattr("app.unlock.secrets.randbelow", lambda n: 4821)
     m.on_fall("bath-01", "inc-1")
     m.on_answer("help")
-    code = code_from(rec.alerts[0])
+    code = m.incident.code  # texted only to a caregiver who commits
     snap = m.snapshot()
     assert snap["state"] == "ALERTING" and snap["transcript"][0]["a"] == "help"
     assert code not in repr(snap)

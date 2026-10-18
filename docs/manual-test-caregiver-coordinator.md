@@ -37,13 +37,14 @@ outbox() { curl -s $B/comms/stub/outbox | python3 -m json.tool | tail -30; }
 
 | # | Do | Expect |
 | --- | --- | --- |
-| A1 | Wait 20 s with no claim | Log: `Voice call dialing · Sarah · no claim for 20 s`, then `placed (stub)`. 20 s later the same for Tom. No more calls after that |
+| A0 | Read the alert in `outbox` | "How soon can you be here?", and no `UNLOCK` code in it |
+| A1 | Wait 20 s with no reply | Log: `Voice call dialing · Sarah · no reply for 20 s`, then `placed (stub)`. 20 s later the same for Tom. No more calls after that. (Any reply, even a question, stops the calls) |
 | A2 | `say_as +1AAA "is she still talking?"` | `{"type":"question"}`. `outbox` has an `answer` text to +1AAA built from the incident only. Nothing read aloud. No 4-digit code in it |
 | A3 | `say_as +1BBB "I might come"` | Read aloud as a message. Caregivers panel: Tom `REPLIED`, not on the way |
-| A4 | `say_as +1AAA "on my way, 10 min"` | Box says "Sarah is about 10 minutes away." Panel: Sarah `ASSIGNED · ETA 10 min`. `outbox`: `ack` to +1AAA ("You said 10 minutes…"), `stand_by` to +1BBB |
+| A4 | `say_as +1AAA "on my way, 10 min"` | Box says "Sarah is about 10 minutes away." Panel: Sarah `ASSIGNED · ETA 10 min`. `outbox`: `code` to +1AAA ("You said 10 minutes… reply UNLOCK <code>"), `stand_by` to +1BBB (no code). Dashboard log: "Door code texted to +1AAA", without the code |
 | A5 | `say_as +1AAA "I'm here"` | Box says "Sarah is at the door." Panel: at the door |
 | A6 | `say_as +13105559999 "on my way"` then `say_as +13105559999 "UNLOCK 0000"` | Refused, not read aloud, unlock attempt logged as refused |
-| A7 | Read the code from the alert in `outbox`, then `say_as +1AAA "UNLOCK <code>"` | Dashboard says "Unlocking…" until the Pi reports `local_unlock`; BOX-3 latch opens, relocks after the hold |
+| A7 | Read the code from the A4 reply in `outbox`, then `say_as +1AAA "UNLOCK <code>"` | Dashboard says "Unlocking…" until the Pi reports `local_unlock`; BOX-3 latch opens, relocks after the hold |
 | A8 | New incident with "I hit my head" typed as the first answer | A call is placed on the next tick, reason `head strike` |
 
 ## B. Live Photon text + restart (STUB_PHOTON=0, gateway running)
@@ -63,7 +64,7 @@ Photon outbound SIP password first (TODOS.md).
 1. Tunnel the backend: `cloudflared tunnel --url $B`. Only `/health`, `/voice/postcall` and `/voice/incident` answer through it; check `curl https://<tunnel>/incident` is 404.
 2. In the ElevenLabs agent: post-call webhook (transcription) → `https://<tunnel>/voice/postcall` with the HMAC secret; a webhook tool `GET https://<tunnel>/voice/incident` with header `Authorization: Bearer <VOICE_TOOL_TOKEN>`. Prompt uses `{{patient_name}}`, `{{room}}`, `{{time_down}}`, `{{triage_summary}}`, `{{on_blood_thinner}}`, `{{last_answer}}`, `{{eta_question}}`, and says the door can only be opened by texting the code.
 3. Start an incident and don't text. After 20 s phone A rings. The agent knows the triage summary and time down and asks for an ETA. Say "I'll be there in 5 minutes". Also say "unlock the door".
-4. Expect: the agent refuses to unlock and tells you to text the code; the door stays locked. After hang-up (webhook): log `Voice call completed`, box says "Sarah is about 5 minutes away.", phone A gets "You said 5 minutes on the call. … Reply UNLOCK with the code from the alert at the door."
+4. Expect: the agent refuses to unlock and tells you to text the code; the door stays locked. After hang-up (webhook): log `Voice call completed`, box says "Sarah is about 5 minutes away.", phone A gets "You said 5 minutes on the call. We told them. At the front door, reply UNLOCK <code>."
 5. Phone A texts `UNLOCK <code>`: latch opens only after the Pi confirms.
 
 TODO(verify) on this first real call: the `ElevenLabs-Signature` format (`t=…,v0=…`) and

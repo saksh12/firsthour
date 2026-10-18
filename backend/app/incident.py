@@ -7,7 +7,8 @@ Rules that must not change:
 - Only enrolled caregivers move the state or get read aloud. A stranger's text
   is logged and dropped.
 - Caregiver coordination (issue #23) is deterministic: regexes decide who claimed the
-  incident and their ETA, timers decide when to call. A model only words Q&A answers,
+  incident and their ETA, timers decide when to call. The door code goes only to a
+  caregiver who commits, never in the first alert. A model only words Q&A answers,
   from incident facts that never include the unlock code. Nothing heard on a call
   is ever parsed as an unlock.
 - Nothing slow runs under the lock: tick() runs on the event loop, so StepFun calls
@@ -51,6 +52,7 @@ class Incident:
     calls: list[str] = field(default_factory=list)  # numbers called, in order
     last_call_at: Optional[float] = None
     call_notes: list[str] = field(default_factory=list)
+    code: str = field(default="", repr=False)  # texted only to a caregiver who commits; never in snapshot/facts
 
 
 def _noop(*_args) -> None:
@@ -457,7 +459,9 @@ class IncidentMachine:
         if inc.state == S.ALERTING:
             self._set(S.RESPONDING, "caregiver claimed" if first else "caregiver replied")
         self._speak(spoken_line(r["name"], Commitment(c.status, r["eta_min"])))
-        self._send_text(inc.id, [sender], claimer_reply(Commitment(c.status, r["eta_min"]), via_call), "ack")
+        # kind "code": the dashboard is told a code text went out, never its text.
+        self._send_text(inc.id, [sender], claimer_reply(Commitment(c.status, r["eta_min"]), inc.code, via_call),
+                        "code" if inc.code else "ack")
         if first:
             self._emit("delivery_status", {"to": [sender], "incident_id": inc.id, "status": "responder_assigned"})
             others = sorted(self.guard.allowed - {sender})
@@ -467,9 +471,10 @@ class IncidentMachine:
                 "assigned": inc.claimed_by == sender}
 
     def _maybe_call(self, inc: Incident, now: float) -> None:
-        """Voice escalation: nobody claimed within call_after_s of the alert (or of the last call),
-        or the person hit their head. One call per number, primary first."""
-        if (self.call_after_s is None or inc.alerted_at is None or inc.claimed_by is not None
+        """Voice escalation: no caregiver replied at all within call_after_s of the alert (or of the
+        last call), or the person hit their head. Any reply means someone is engaged, so it stops.
+        One call per number, primary first."""
+        if (self.call_after_s is None or inc.alerted_at is None or inc.responders
                 or inc.state not in (S.ALERTING, S.RESPONDING) or len(inc.calls) >= len(self.call_order)):
             return
         since = inc.last_call_at if inc.last_call_at is not None else inc.alerted_at
@@ -479,7 +484,7 @@ class IncidentMachine:
         number = self.call_order[len(inc.calls)]
         inc.calls.append(number)
         inc.last_call_at = now
-        reason = "head strike" if head else f"no claim for {self.call_after_s:g} s"
+        reason = "head strike" if head else f"no reply for {self.call_after_s:g} s"
         log.info("voice escalation call #%d reason=%s incident_id=%s", len(inc.calls), reason, inc.id)
         self._emit("call_update", {"incident_id": inc.id, "status": "dialing", "reason": reason,
                                    "name": self.names.get(number), "attempt": len(inc.calls)})
@@ -500,10 +505,10 @@ class IncidentMachine:
 
     def _escalate(self, reason: str) -> None:
         inc = self.incident
-        code = self.guard.open_incident(inc.id)
+        inc.code = self.guard.open_incident(inc.id)
         inc.alerted_at = self._clock()
         self._set(S.ALERTING, reason)
-        self._send_alert(inc.id, format_alert(self.profile, self._clock() - inc.opened_at, inc.triage, code))
+        self._send_alert(inc.id, format_alert(self.profile, self._clock() - inc.opened_at, inc.triage))
 
     def _finish(self, final: S, reason: str) -> None:
         self._set(final, reason)
