@@ -767,6 +767,8 @@ The person can stop at any point. The backend sends the alert after question 1 i
 
 ### 11.3 Call (`backend/app/triage.py`)
 
+Plan-time sketch. The real code uses stdlib `urllib` (no SDK), `max_tokens=5000` because reasoning counts against it, and a 45 s deadline (11.4).
+
 ```python
 import os, json
 from openai import OpenAI
@@ -788,8 +790,8 @@ def parse_answers(transcript: str, profile: dict) -> dict:
                   {"role": "user", "content": transcript}],
         response_format={"type": "json_object"},
         temperature=0.1,
-        max_tokens=300,
-        timeout=15,                 # background only: the rule-based record already escalated
+        max_tokens=5000,
+        timeout=45,                 # background only: the rule-based record already escalated
         reasoning_effort="low",     # documented for step-5-preview
     )
     data = json.loads(resp.choices[0].message.content)
@@ -799,7 +801,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.4 Safety rails
 
-- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **15-second timeout** (measured 5-13 s); on timeout or bad JSON the rule record stays. The demo never waits on the model.
+- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **45-second timeout** (measured 5-38 s on `low`; 8.9-12.9 s in the Oct 18 morning live check); on timeout or bad JSON the rule record stays. The demo never waits on the model. The dashboard shows the rules record, the model's own record and the record in use side by side, and logs every call with its latency and outcome (`stepfun_call`), so the operator can see what the model added, what the rules kept, and when it fell back.
 - **Validate the output** with a pydantic model before using it.
 - **The medication list comes from the profile**, entered by a caregiver, not from the model.
 - **Show the raw transcript** next to the record on the dashboard. Users can see and correct what the AI understood. StepFun's judges look for reliability and for users understanding and controlling the workflow.
@@ -807,7 +809,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.5 Caregiver reply rewrite
 
-Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line stops `step-5-preview` from reasoning first (measured 1-1.8 s instead of 6-12 s). **3-second timeout**; fall back to reading the original if the call fails.
+Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line was meant to stop `step-5-preview` from reasoning first (measured 1-1.8 s Oct 17); by Oct 18 the model reasoned 800-1200 tokens regardless and took 6-12 s (6.6 s in the live check), and there is no off switch. **10-second timeout** (`STEPFUN_REWRITE_TIMEOUT_S`); fall back to reading the original if the call fails. A caregiver question goes through the same pool with a **12-second timeout** (`STEPFUN_ANSWER_TIMEOUT_S`, measured 7.4-8.0 s), then the templated status; it is texted, so it can wait longer than speech.
 
 ---
 
