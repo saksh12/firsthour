@@ -112,7 +112,7 @@ def test_unexpected_response_shape_falls_back():
 
 def test_hard_deadline_even_if_the_server_hangs():
     t0 = time.monotonic()
-    rec = sf(FakeTransport(GOOD, delay=2.0), timeout_s=0.2).triage(ANSWERS, DEMO_PROFILE)
+    rec = sf(FakeTransport(GOOD, delay=2.0), triage_timeout_s=0.2).triage(ANSWERS, DEMO_PROFILE)
     assert time.monotonic() - t0 < 1.0
     assert rec == parse_rules(ANSWERS, DEMO_PROFILE)
 
@@ -154,6 +154,15 @@ def test_transcript_never_logged(caplog):
 
 
 # --- rewrite -------------------------------------------------------------------
+
+def test_rewrite_and_triage_have_separate_deadlines():
+    t = FakeTransport(GOOD)
+    s = sf(t, timeout_s=3.0, triage_timeout_s=15.0)
+    s.triage(ANSWERS, DEMO_PROFILE)
+    s.rewrite("omw")
+    assert [c[3] for c in t.calls] == [15.0, 3.0]
+    assert "Answer immediately" in t.calls[1][2]["messages"][0]["content"]
+
 
 def test_rewrite_good():
     s = sf(FakeTransport("Your daughter is two minutes away."))
@@ -198,6 +207,12 @@ def test_app_uses_stepfun_for_triage_and_reply():
                                        STEPFUN_TRANSPORT=transport)))
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help"}).json()
+    assert snap["state"] == "ALERTING"  # the rule-based record escalates; StepFun refines it after
+    for _ in range(100):
+        snap = c.get("/incident").json()
+        if snap["triage"]["summary"] == GOOD["summary"]:
+            break
+        time.sleep(0.01)
     assert snap["triage"]["summary"] == GOOD["summary"]
     assert snap["triage"]["on_blood_thinner"] is True
     c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "omw"})

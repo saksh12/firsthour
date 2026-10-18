@@ -7,7 +7,7 @@ import pytest
 from app.incident import IncidentMachine
 from app.models import IncidentState as S
 from app.profile import DEMO_PROFILE
-from app.triage import QUESTIONS
+from app.triage import QUESTIONS, parse_rules
 from app.unlock import UnlockGuard
 from conftest import CAREGIVER, STRANGER
 
@@ -241,7 +241,7 @@ def slow_machine(clock, rec, gate, calls):
     guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
     return IncidentMachine(guard, DEMO_PROFILE, clock=clock, silence_s=8, emit=rec.emit,
                            speak=rec.spoken.append, send_alert=lambda i, t: rec.alerts.append(t),
-                           triage_fn=slow_triage)
+                           triage_fn=slow_triage, background=lambda fn: fn())
 
 
 def test_slow_triage_does_not_delay_the_alert_or_race_the_silence_timer(clock, rec):
@@ -280,3 +280,16 @@ def test_stale_triage_result_is_not_applied(clock, rec):
     gate.set()
     t.join()
     assert m.incident is None
+
+
+def test_answer_returns_before_the_model_finishes(clock, rec):
+    import threading
+
+    gate, calls = threading.Event(), []
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    m = IncidentMachine(guard, DEMO_PROFILE, clock=clock, emit=rec.emit, speak=rec.spoken.append,
+                        triage_fn=lambda a, p: (calls.append(1), gate.wait(5), parse_rules(a, p))[2])
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("help, my hip hurts")  # returns while the model is still "thinking"
+    assert m.state == S.ALERTING and m.snapshot()["triage"]["pain_location"] == "hip"
+    gate.set()

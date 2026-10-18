@@ -196,6 +196,9 @@ Rules:
 REWRITE_SYSTEM = (
     "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud "
     "to someone who has fallen. Do not add information. Output only the sentence."
+    # Measured Oct 17: without this, step-5-preview reasons for 900+ tokens (6-12 s);
+    # with it, ~20 tokens in 1-1.8 s. Undocumented, so the 3 s fallback still guards it.
+    " Answer immediately. Do not think step by step."
 )
 
 MAX_REWRITE_WORDS = 20
@@ -241,18 +244,22 @@ def _strip_fences(text: str) -> str:
 
 class StepFun:
     def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
-                 stub: bool = True, timeout_s: float = 3.0, transport: Transport = urllib_transport):
+                 stub: bool = True, timeout_s: float = 3.0, triage_timeout_s: float = 15.0,
+                 transport: Transport = urllib_transport):
         self.enabled = not stub and bool(api_key) and bool(base_url)
         if not stub and not self.enabled:
             log.warning("STUB_STEPFUN=0 but STEPFUN_API_KEY/STEPFUN_BASE_URL missing; using rules only")
         self.api_key, self.model = api_key, model
         self.url = base_url.rstrip("/") + "/chat/completions"
-        self.timeout_s = timeout_s
+        # Rewrite is spoken to the person, so it keeps a tight deadline. Triage runs in the
+        # background after the instant rule-based record (measured 5-13 s on low effort; it
+        # reasons through extraction whatever the prompt says).
+        self.timeout_s, self.triage_timeout_s = timeout_s, triage_timeout_s
         self._transport = transport
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
 
-    def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int) -> str:
+    def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int, timeout_s: float) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -265,9 +272,9 @@ class StepFun:
         if json_mode:
             body["response_format"] = {"type": "json_object"}  # verified on our key, Oct 17
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        fut = self._pool.submit(self._transport, self.url, headers, body, self.timeout_s)
+        fut = self._pool.submit(self._transport, self.url, headers, body, timeout_s)
         try:
-            data = fut.result(timeout=self.timeout_s)
+            data = fut.result(timeout=timeout_s)
         except FutureTimeout:
             raise StepFunError("timeout")
         except urllib.error.HTTPError as e:
@@ -285,7 +292,8 @@ class StepFun:
             return rules
         t0 = time.monotonic()
         try:
-            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=1200)
+            content = self._chat(TRIAGE_SYSTEM, transcript_text(answers), json_mode=True, max_tokens=2000,
+                                 timeout_s=self.triage_timeout_s)
             try:
                 raw = json.loads(_strip_fences(content))
             except ValueError:
@@ -313,7 +321,8 @@ class StepFun:
             return text
         t0 = time.monotonic()
         try:
-            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200).strip().strip('"')
+            out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200,
+                             timeout_s=self.timeout_s).strip().strip('"')
             if not out:
                 raise StepFunError("empty")
             if len(out.split()) > MAX_REWRITE_WORDS:

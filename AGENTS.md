@@ -190,7 +190,8 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 | --- | --- |
 | Thud → `TIME DOWN` on display | Local only, no network in path |
 | Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
-| StepFun triage call | Hard timeout **3 s**, then rule-based fallback |
+| StepFun triage call | Runs in the background after the instant rule-based record (which drives escalation and the alert). Hard timeout **15 s**, then the rule record stays. Measured 5-13 s on `low` |
+| StepFun reply rewrite | Hard timeout **3 s**, then the original text. Measured 1-1.8 s with the "answer immediately" prompt |
 | Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
 

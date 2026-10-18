@@ -699,8 +699,8 @@ def parse_answers(transcript: str, profile: dict) -> dict:
         response_format={"type": "json_object"},
         temperature=0.1,
         max_tokens=300,
-        timeout=3,
-        # check the StepFun docs for the parameter that sets LOW reasoning effort and use it
+        timeout=15,                 # background only: the rule-based record already escalated
+        reasoning_effort="low",     # documented for step-5-preview
     )
     data = json.loads(resp.choices[0].message.content)
     data["on_blood_thinner"] = profile["on_blood_thinner"]   # from the profile, never the model
@@ -709,7 +709,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.4 Safety rails
 
-- **3-second timeout.** On timeout or bad JSON, fall back to **rule-based parsing** (keywords like "head", "hip", "can't move", "no") and a templated summary. The demo never waits on the model.
+- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **15-second timeout** (measured 5-13 s); on timeout or bad JSON the rule record stays. The demo never waits on the model.
 - **Validate the output** with a pydantic model before using it.
 - **The medication list comes from the profile**, entered by a caregiver, not from the model.
 - **Show the raw transcript** next to the record on the dashboard. Users can see and correct what the AI understood. StepFun's judges look for reliability and for users understanding and controlling the workflow.
@@ -717,7 +717,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.5 Caregiver reply rewrite
 
-Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information." Fall back to reading the original if the call fails.
+Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line stops `step-5-preview` from reasoning first (measured 1-1.8 s instead of 6-12 s). **3-second timeout**; fall back to reading the original if the call fails.
 
 ---
 
