@@ -6,6 +6,8 @@ import pytest
 
 # app.main builds a module-level app at import, which needs a secret.
 os.environ.setdefault("SHARED_SECRET", "test-secret")
+# No audio on CI/dev machines: speak() becomes a no-op unless a test opts in.
+os.environ.setdefault("VOICE_PLAYBACK", "0")
 
 # Make both `app` (backend) and `edge` importable, so one pytest run covers
 # both sides of the unlock contract.

@@ -21,7 +21,7 @@ Last updated Sat Oct 17, 5:25 PM.
 | Moment | What judges see | Status | What's missing |
 | --- | --- | --- | --- |
 | M1 The thud | Clock starts, sensors spike | 🔶 Works with the fake Arduino | Arduino sketch, real sensors, calibration |
-| M2 The voice | "Are you okay?" spoken, triage follows | ⬜ | No audio plays yet (ElevenLabs), no speech input (typed box only) |
+| M2 The voice | "Are you okay?" spoken, triage follows | 🔶 Audio pipeline works | Fixed phrases pre-cached and play on macOS (afplay/say fallback); needs a run on the demo laptop with the real key. No speech input yet (typed box only) |
 | M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test |
 | M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ Unlock rules, signing, door shows the Pi's confirmation | Arduino sketch (simulated latch, no servo) |
 | M5 Offline | Wi-Fi off: alarm and clock keep going | 🔶 Covered by tests | Real hardware run |
@@ -35,7 +35,7 @@ Last updated Sat Oct 17, 5:25 PM.
 | `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say |
 | `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Measured 5-7 s per call, so the 3 s timeout always falls back; timeout decision pending |
 | `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
-| `backend/` voice | Speak the fixed questions and caregiver replies | ⬜ | ElevenLabs key and stock voice work; nothing plays audio yet |
+| `backend/` voice | Speak the fixed questions and caregiver replies | 🔶 | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; verified end-to-end against a mock endpoint, real-key run pending |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
 | `edge/` on the Pi | Same code on QNX over USB serial | ⬜ | Gate 1 at 7:00 PM: QNX or Linux |
 | `arduino/hub.ino` | Sensors, simulated latch (LED), buzzer, display | ⬜ | Need accelerometer chip and display type |

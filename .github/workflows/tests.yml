@@ -28,6 +28,7 @@ jobs:
         env:
           # Tests build their own settings; this only keeps app.main importable.
           SHARED_SECRET: ci-test-secret
+          VOICE_PLAYBACK: "0"
         run: |
           pip install -r backend/requirements.txt
           cd backend
