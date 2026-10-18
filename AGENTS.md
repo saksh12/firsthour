@@ -199,7 +199,9 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 | Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
 | Spoken answer → transcript on the Pi (`PI_STT=1`) | Off the sensor loop, whisper at lower QNX priority than the reader, 10 s timeout. Measured live with `base.en` and clips up to 8 s: whisper 2.7-3.1 s, clip upload to answer applied 3.8-4.3 s (`tiny.en`: 1.16-1.55 s and 1.6-2.4 s) |
 | StepFun triage call | Runs in the background after the instant rule-based record (which drives escalation and the alert). Hard timeout **45 s**, then the rule record stays. Measured 5-38 s on `low` (the lowest level); unclear answers reason longest, up to 3593 tokens, so `max_tokens` is 5000 |
-| StepFun reply rewrite | Hard timeout **3 s**, then the original text. Measured 1-1.8 s with the "answer immediately" prompt |
+| StepFun reply rewrite | Hard timeout **10 s** (`STEPFUN_REWRITE_TIMEOUT_S`), then the original text. Measured 1-1.8 s Oct 17 with the "answer immediately" prompt; Oct 18 morning the model reasoned 800-1200 tokens regardless, 6-12 s (no off switch; the flash models are no faster) |
+| StepFun caregiver Q&A answer | Hard timeout **12 s** (`STEPFUN_ANSWER_TIMEOUT_S`), then the templated status. Texted, so it can wait longer than speech. Measured 7.4 s Oct 18 |
+| Caregiver reply → backend (live Photon, polled every 2 s) | Measured Oct 18: 3.5 s from the phone's send to `RESPONDING`; the door-code text was accepted by Photon 0.3 s later |
 | Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
 

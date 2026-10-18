@@ -99,6 +99,8 @@ def load_settings() -> dict:
         "STEPFUN_API_KEY": os.getenv("STEPFUN_API_KEY", ""),
         "STEPFUN_BASE_URL": os.getenv("STEPFUN_BASE_URL", ""),
         "STEPFUN_MODEL": os.getenv("STEPFUN_MODEL", "step-5-preview"),
+        "STEPFUN_REWRITE_TIMEOUT_S": float(os.getenv("STEPFUN_REWRITE_TIMEOUT_S", "10")),
+        "STEPFUN_ANSWER_TIMEOUT_S": float(os.getenv("STEPFUN_ANSWER_TIMEOUT_S", "12")),
         "SENTRY_DSN": os.getenv("SENTRY_DSN", ""),
         "STUB_ELEVENLABS": os.getenv("STUB_ELEVENLABS", "1") == "1",
         "ELEVENLABS_API_KEY": os.getenv("ELEVENLABS_API_KEY", ""),
@@ -340,6 +342,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     stepfun = StepFun(
         api_key=s.get("STEPFUN_API_KEY", ""), base_url=s.get("STEPFUN_BASE_URL", ""),
         model=s.get("STEPFUN_MODEL", "step-5-preview"), stub=s.get("STUB_STEPFUN", True),
+        timeout_s=s.get("STEPFUN_REWRITE_TIMEOUT_S", 10.0), answer_timeout_s=s.get("STEPFUN_ANSWER_TIMEOUT_S", 12.0),
         **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")

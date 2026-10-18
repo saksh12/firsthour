@@ -186,6 +186,18 @@ def test_rewrite_and_triage_have_separate_deadlines():
     assert "Answer immediately" in t.calls[1][2]["messages"][0]["content"]
 
 
+def test_answer_has_its_own_deadline_and_defaults_follow_measured_latency():
+    # Oct 18: step-5-preview reasons 6-12 s on these prompts, so 10 s spoken / 12 s texted.
+    t = FakeTransport({"kind": "answer", "answer": "She is awake."})
+    s = sf(t, timeout_s=3.0, answer_timeout_s=12.0)
+    facts = {"patient": "Margaret", "pronoun": "she", "time_down": "1 min 05 s", "triage_summary": "Conscious.",
+             "last_answer": "Yes", "responders": []}
+    assert s.answer("Is she awake?", facts) == ("answer", "She is awake.")
+    assert t.calls[0][3] == 12.0
+    d = StepFun(api_key="k", base_url="https://api.stepfun.example/v1", stub=False)
+    assert (d.timeout_s, d.answer_timeout_s, d.triage_timeout_s) == (10.0, 12.0, 45.0)
+
+
 def test_rewrite_good():
     s = sf(FakeTransport("Your daughter is two minutes away."))
     assert s.rewrite("im like 2 min away hang on!!") == "Your daughter is two minutes away."
