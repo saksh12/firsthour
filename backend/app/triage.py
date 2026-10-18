@@ -205,6 +205,16 @@ REWRITE_SYSTEM = (
 
 MAX_REWRITE_WORDS = 20
 
+QA_SYSTEM = (
+    "A caregiver texted about a live fall incident. You get their text and the incident FACTS as JSON. "
+    "If the text is a question, answer it in at most 40 plain, calm words using ONLY the facts; if the "
+    "facts don't say, answer that we don't know yet. Never give medical advice, diagnoses or instructions; "
+    "for anything medical say to follow 911 or emergency services. Never mention the door code. If the "
+    "text is not a question but a message for the person, return kind \"message\". Output JSON only: "
+    "{\"kind\": \"answer\" or \"message\", \"answer\": string}. Answer immediately."
+)
+MAX_ANSWER_WORDS = 50
+
 # Transport: (url, headers, body_dict, timeout_s) -> parsed JSON response. Injectable for tests.
 Transport = Callable[[str, dict, dict, float], dict]
 
@@ -380,6 +390,40 @@ class StepFun:
             return text
         self._log("rewrite", t0, True, None)
         return out
+
+    def answer(self, question: str, facts: dict) -> tuple[str, str]:
+        """Caregiver Q&A. Returns ("answer", text) or ("message", "") when the model says the text
+        is a message to read aloud. Any failure: the templated status answer."""
+        from .coordinator import status_answer  # coordinator imports summarize from here
+
+        fallback = ("answer", status_answer(facts))
+        if not self.enabled:
+            return fallback
+        t0 = time.monotonic()
+        try:
+            content = self._chat(QA_SYSTEM, json.dumps({"text": question, "facts": facts}), json_mode=True,
+                                 max_tokens=1200, timeout_s=self.timeout_s * 2, pool=self._rewrite_pool)
+            try:
+                raw = json.loads(_strip_fences(content))
+            except ValueError:
+                raise StepFunError("bad json")
+            kind = raw.get("kind") if isinstance(raw, dict) else None
+            text = str(raw.get("answer") or "").strip() if isinstance(raw, dict) else ""
+            if kind == "message":
+                self._log("answer", t0, True, None)
+                return "message", ""
+            if kind != "answer" or not text:
+                raise StepFunError("bad shape")
+            if len(text.split()) > MAX_ANSWER_WORDS:
+                raise StepFunError("too long")
+            # Only facts: a number that is in neither the facts nor the question is invented.
+            if set(re.findall(r"\d+", text)) - set(re.findall(r"\d+", json.dumps(facts) + question)):
+                raise StepFunError("added numbers")
+        except StepFunError as e:
+            self._log("answer", t0, False, str(e))
+            return fallback
+        self._log("answer", t0, True, None)
+        return "answer", text
 
     def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str]) -> None:
         ms = int((time.monotonic() - t0) * 1000)

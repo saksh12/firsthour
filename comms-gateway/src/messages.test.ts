@@ -73,7 +73,7 @@ describe("isCaregiverReply", () => {
 
 describe("toBackendInbound", () => {
   it("maps to the backend's {sender, text}, incl. the sender's number", () => {
-    expect(toBackendInbound(received())).toEqual({ sender: CAREGIVER, text: "UNLOCK 4821" });
+    expect(toBackendInbound(received())).toMatchObject({ sender: CAREGIVER, text: "UNLOCK 4821" });
   });
   it("throws when there is no plain text", () => {
     expect(() => toBackendInbound(received({ content: { type: "image" } }))).toThrow();

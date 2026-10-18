@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 node_modules/
 dist/
+comms-gateway/.state/
 .DS_Store
 edge/logs/
 backend/audio_cache/

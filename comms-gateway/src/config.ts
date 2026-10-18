@@ -5,6 +5,7 @@ export interface Config {
   stubPhoton: boolean;
   backendUrl: string; // where inbound caregiver replies are forwarded
   sharedSecret: string; // SHARED_SECRET, signs forwarded replies (X-Signature)
+  stateFile: string; // GATEWAY_STATE_FILE: durable inbound cursor + conversations ("" = memory only)
   photon: {
     token: string; // PHOTON_TOKEN  (project API key, pho_sk_...)
     projectId: string; // PHOTON_PROJECT_ID (pho_prj_...)
@@ -23,6 +24,7 @@ export function loadConfig(): Config {
     stubPhoton: env("STUB_PHOTON", "1") !== "0",
     backendUrl: env("BACKEND_URL", "http://localhost:8000"),
     sharedSecret: env("SHARED_SECRET"),
+    stateFile: env("GATEWAY_STATE_FILE", ".state/gateway.json"),
     photon: {
       token: env("PHOTON_TOKEN"),
       projectId: env("PHOTON_PROJECT_ID"),

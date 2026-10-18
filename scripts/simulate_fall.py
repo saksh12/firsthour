@@ -167,18 +167,23 @@ def run(api: Api, args, secret: str, caregiver: str) -> None:
     _, inbox = api.call("GET", "/comms/stub/outbox")
     alert = inbox["messages"][-1]["text"]
     print("   " + alert.replace("\n", "\n   "))
-    code = re.search(r"UNLOCK (\d{4})", alert).group(1)
+    check(not re.search(r"UNLOCK \d{4}", alert), "the alert carries no door code")
+
+    step("Caregiver replies with an ETA")
+    _, r = api.call("POST", "/comms/inbound", {"sender": caregiver, "text": "I'm 2 minutes away"})
+    _, snap = api.call("GET", "/incident")
+    check(r["accepted"] and snap["state"] == "RESPONDING", f"claimed, state {snap['state']}")
+    _, inbox = api.call("GET", "/comms/stub/outbox")
+    reply = inbox["messages"][-1]["text"]
+    print("   " + reply)
+    code = re.search(r"UNLOCK (\d{4})", reply).group(1)
+    check(inbox["messages"][-1]["to"] == [caregiver], "door code texted only to the caregiver who is coming")
 
     step("Stranger texts UNLOCK with the right code")
     _, r = api.call("POST", "/comms/inbound", {"sender": STRANGER, "text": f"UNLOCK {code}"})
     check(r == {"type": "unlock_attempt", "allowed": False, "reason": "not enrolled"}, f"refused: {r['reason']}")
     _, cmds = poll(api, secret, args.device)
     check(cmds["commands"] == [], "no command reached the Pi")
-
-    step("Caregiver replies with a message")
-    _, r = api.call("POST", "/comms/inbound", {"sender": caregiver, "text": "I'm 2 minutes away"})
-    _, snap = api.call("GET", "/incident")
-    check(r["accepted"] and snap["state"] == "RESPONDING", f"read aloud, state {snap['state']}")
 
     step("Caregiver replies UNLOCK <code>")
     _, r = api.call("POST", "/comms/inbound", {"sender": caregiver, "text": f"UNLOCK {code}"})

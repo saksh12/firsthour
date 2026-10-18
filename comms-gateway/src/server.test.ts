@@ -55,3 +55,60 @@ describe("inbound poll", () => {
     expect(forwarded).toEqual(["UNLOCK 4821", "on my way"]);
   });
 });
+
+describe("durable inbound cursor", () => {
+  it("a restarted gateway forwards the reply that arrived while it was down, once", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { GatewayState } = await import("./state.js");
+    const file = join(mkdtempSync(join(tmpdir(), "gw-")), "state.json");
+    const t0 = Date.now();
+    const at = (ms: number) => new Date(t0 + ms).toISOString();
+    const inbox = [reply("m1", "on my way", at(1000))];
+    const remembered: string[] = [];
+    const gateway = {
+      listReceivedSince: async (since: string) => inbox.filter((m) => m.createdAt >= since),
+      remember: (h: string) => void remembered.push(h),
+    };
+    const forwarded: InboundForward[] = [];
+    const forward = async (_c: Config, p: InboundForward) => void forwarded.push(p);
+
+    await createInboundPoll(cfg, gateway, forward, new GatewayState(file))();
+    expect(forwarded.map((p) => p.text)).toEqual(["on my way"]);
+    expect(forwarded[0].messageId).toBe("m1");
+
+    // Gateway is down; two replies land (one at the same createdAt as the cursor).
+    inbox.push(reply("m2", "10 min", at(1000)), reply("m3", "UNLOCK 4821", at(60_000)));
+    const restarted = createInboundPoll(cfg, gateway, forward, new GatewayState(file));
+    await restarted();
+    expect(forwarded.map((p) => p.text)).toEqual(["on my way", "10 min", "UNLOCK 4821"]);
+    await restarted();
+    expect(forwarded).toHaveLength(3);
+  });
+
+  it("keeps the caregiver's conversation across a restart", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { GatewayState } = await import("./state.js");
+    const file = join(mkdtempSync(join(tmpdir(), "gw-")), "state.json");
+    new GatewayState(file).remember(CAREGIVER, { spaceId: "space_1", senderId: "u_agent" });
+    expect(new GatewayState(file).conversation(CAREGIVER)).toEqual({ spaceId: "space_1", senderId: "u_agent" });
+  });
+
+  it("a failed forward leaves the saved cursor where it was", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { GatewayState } = await import("./state.js");
+    const file = join(mkdtempSync(join(tmpdir(), "gw-")), "state.json");
+    const inbox = [reply("m1", "omw", new Date(Date.now() + 1000).toISOString())];
+    const gateway = { listReceivedSince: async () => inbox, remember: () => {} };
+    const failing = async () => {
+      throw new Error("backend /comms/inbound -> 502");
+    };
+    await expect(createInboundPoll(cfg, gateway, failing, new GatewayState(file))()).rejects.toThrow("502");
+    expect(new GatewayState(file).since).toBeNull();
+  });
+});

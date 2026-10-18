@@ -121,6 +121,9 @@ class UnlockResult(BaseModel):
 DashboardEventType = Literal[
     "incident_update", "triage_update", "message_in", "message_out", "unlock_attempt", "device_status",
     "question_played", "speech_heard", "voice_line",
+    "script_done",  # the fixed questions are over; the dashboard starts the companion agent
+    # issue #23: honest delivery states, who is coming, voice escalation
+    "delivery_status", "responder_update", "call_update",
 ]
 
 

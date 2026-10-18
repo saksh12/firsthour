@@ -14,6 +14,7 @@ import type { Config } from "./config.js";
 import { conversationOf, isCaregiverReply, toBackendInbound, type InboundForward } from "./messages.js";
 import { NoConversationError, type PhotonGateway } from "./photon.js";
 import { signHeaders } from "./sign.js";
+import { GatewayState } from "./state.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -40,6 +41,8 @@ export async function forwardInbound(cfg: Config, payload: InboundForward): Prom
     },
     body,
   });
+  // 409: the backend already has this messageId (a replay after a restart). Done.
+  if (resp.status === 409) return { duplicate: true };
   if (!resp.ok) throw new Error(`backend /comms/inbound -> ${resp.status}`);
   return resp.json().catch(() => ({}));
 }
@@ -67,29 +70,29 @@ export function createServer(cfg: Config, gateway: PhotonGateway) {
 
 /**
  * One poll of Photon for received iMessages, forwarding caregiver replies to the
- * backend. A message is marked seen, and `since` moves past it, only once its forward
- * succeeds: if the backend is down for a tick, the reply is retried on the next one.
+ * backend. The durable cursor (GatewayState) moves past a message only once the
+ * backend accepted it: if the backend is down for a tick, the reply is retried on the
+ * next one, and a gateway restart resumes from the saved cursor instead of "now".
  * Messages come oldest first, so the tick stops at the first failure and nothing
- * after it is skipped.
+ * after it is skipped. A replay the backend already has comes back 409 and counts as done.
  */
 export function createInboundPoll(
   cfg: Config,
   gateway: Pick<PhotonGateway, "listReceivedSince" | "remember">,
   forward: (cfg: Config, payload: InboundForward) => Promise<unknown> = forwardInbound,
+  state: GatewayState = new GatewayState(""),
 ): () => Promise<void> {
-  // In memory: a gateway restart still drops replies in the gap. A durable cursor is the Photon issue.
-  let since = new Date(Date.now() - 5000).toISOString();
-  const seen = new Set<string>();
+  // First run ever: start a few seconds back. After that, always from the saved cursor.
+  const start = new Date(Date.now() - 5000).toISOString();
 
   return async () => {
-    for (const m of await gateway.listReceivedSince(since)) {
-      if (seen.has(m.id)) continue;
+    for (const m of await gateway.listReceivedSince(state.since ?? start)) {
+      if (state.seen(m.id, m.createdAt)) continue;
       if (isCaregiverReply(m, cfg.photon.agentHandle)) {
         gateway.remember(m.sentBy.handle, conversationOf(m));
         await forward(cfg, toBackendInbound(m));
       }
-      seen.add(m.id);
-      if (m.createdAt > since) since = m.createdAt;
+      state.advance(m.id, m.createdAt);
     }
   };
 }
@@ -97,7 +100,7 @@ export function createInboundPoll(
 /** Background inbound poller (real path only). Returns a stop fn. */
 export function startInboundPoller(cfg: Config, gateway: PhotonGateway, intervalMs = 2000): () => void {
   let stopped = false;
-  const poll = createInboundPoll(cfg, gateway);
+  const poll = createInboundPoll(cfg, gateway, forwardInbound, gateway.state);
 
   const tick = async (): Promise<void> => {
     if (stopped) return;

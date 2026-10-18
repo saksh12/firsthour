@@ -51,6 +51,7 @@ export interface ReceivedMessage {
 export interface InboundForward {
   sender: string; // caregiver's phone/email (sentBy.handle -- Q3: inbound carries it)
   text: string; // the reply text
+  messageId?: string; // Photon message id: the backend dedupes a replayed forward on it
 }
 
 /** Where to reply to a caregiver: their space with our agent line. */
@@ -97,7 +98,7 @@ export function isCaregiverReply(msg: ReceivedMessage, agentHandle: string): boo
 export function toBackendInbound(msg: ReceivedMessage): InboundForward {
   const text = extractPlainText(msg.content);
   if (text === null) throw new Error("message has no plain text to forward");
-  return { sender: msg.sentBy.handle, text };
+  return { sender: msg.sentBy.handle, text, messageId: msg.id };
 }
 
 export function conversationOf(msg: ReceivedMessage): Conversation {

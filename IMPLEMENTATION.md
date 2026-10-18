@@ -290,12 +290,14 @@ The Pi **must** check: signature valid, `ts` within 10 seconds, nonce not seen b
 Outbound alert text template:
 
 ```text
-FALL ALERT: Margaret (Bathroom). Down 00:32.
+FirstHour: Margaret has had a fall in the bathroom. Down 00:32.
 Conscious. Right hip pain, cannot move leg. No head strike.
 NOTE: on a blood thinner.
-Reply UNLOCK 4821 to open the front door.
-Or reply with a message and we'll read it to her.
+How soon can you be here? Reply with an ETA like "10 min" or ON MY WAY, and we'll text you the door code.
+Or ask a question, or send a message and we'll read it to her.
 ```
+
+The alert goes to every caregiver, so it carries **no door code**. A caregiver who says they're coming (text, or on the voice call) gets a private reply with the code: `You said 10 minutes. We told them. At the front door, reply UNLOCK 4821.` The dashboard is told a code text went out (`message_out` kind `code`), never its text. If no caregiver replies at all within `VOICE_CALL_AFTER_SECONDS` (20) of the alert, the backend calls them in order; any reply stops the calls.
 
 Inbound grammar: `UNLOCK <4 digits>` unlocks if rules pass. Anything else is a message to read aloud (rewritten to one short calm sentence, max 20 words).
 
@@ -329,7 +331,7 @@ The signature covers the whole body, so a captured reply can be resent inside th
 
 ### 6.7 Dashboard live events (WebSocket from backend)
 
-`incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying). The first snapshot also carries `pi_stt` (true when `PI_STT=1`).
+`incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying), `script_done {incident_id}` (the five questions and closing audio are over; the dashboard starts the companion agent, 6.9). Snapshots carry `companion_ready` for reconnects; the first snapshot also carries `pi_stt` (true when `PI_STT=1`). From issue #23: `delivery_status` (`queued` → `sent` = Photon API accepted → `acknowledged` = caregiver replied → `responder_assigned`; `blocked`/`failed` on errors; no delivered/read), `responder_update` (`accepted` | `arriving` + `eta_min` | `arrived`, `assigned` for the first claim), `call_update` (`dialing` | `placed` | `failed` | `completed` + summary).
 
 ### 6.8 Speech-to-text on the Pi (QNX AI module: whisper.cpp)
 
@@ -345,6 +347,18 @@ On only with `PI_STT=1` on the backend and `WHISPER_MODEL` set on the Pi. The mi
 All three `/person/*` routes are laptop-only and answer 404 while `PI_STT=0`. The words are never logged on either side; logs keep clip id, latency, length and word count.
 
 ---
+
+### 6.9 Companion agent after the fixed script (ElevenLabs Agents)
+
+The first check uses five fixed questions, cached laptop playback, and Pi transcription. It still needs the laptop and the local Pi connection; StepFun receives transcripts for enrichment and remote messaging needs internet access. The Pi's alarm and clock do not depend on any of those services. After the fifth question, the box says "Thank you. That's all my questions." Only when that audio finishes does `script_done` start an ElevenLabs Agents session on the laptop microphone and AirPods. The line makes no claim that the companion connected or that a caregiver received the alert.
+
+- **Auth:** `GET /companion/session` (laptop only) mints a short-lived WebRTC conversation token with `ELEVENLABS_API_KEY` for `ELEVENLABS_COMPANION_AGENT_ID`; the key never reaches the page. Off (`{"enabled": false}`) with `STUB_ELEVENLABS=1` or missing credentials; 409 until the script and closing audio finish. Settings are read at backend startup, so `.env` changes require a restart.
+- **Client tools** (registered in the dashboard, calling laptop-only routes, never through the tunnel): `get_incident_facts` → `GET /companion/facts` (the code-free facts the call agent sees); `relay_to_caregiver {message, urgency: normal|urgent}` → `POST /companion/relay`. The agent decides what is worth relaying; the backend texts it to the claimer, else every caregiver, at most 6 per incident, and refuses any text containing the code or relays before the handoff. A tool response of `sent:true` means queued for sending, not confirmed Photon acceptance or delivery.
+- **Caregiver news** reaches the agent as contextual updates (claims and ETAs, rewritten messages, call summaries, the door opening). The backend still reads caregiver messages aloud itself; the agent's audio is muted while it does.
+- **Never:** no unlock tool, no code, no triage changes, no medical advice (agent prompt). Offline, the agent just goes quiet; the Pi's alarm, clock and locked door are unaffected.
+- Dependency: `@elevenlabs/client@1.28.0`, loaded by the dashboard from esm.sh.
+- **Failure handling:** the dashboard shows connecting, connected, off, and disconnected states, with a retry button on failure. It does not claim to be listening when startup fails. Backend disconnection closes the agent session. A session finishing startup after a resolve is closed rather than attached to a later incident. Use one microphone-enabled dashboard tab.
+- Prompts and runtime limits: `docs/voice-prompts.md`. Backend checks: `pytest -q tests/test_companion.py`; frontend checks: `node --test dashboard/companion.test.cjs`.
 
 ## 7. The phases (step by step)
 
@@ -578,7 +592,7 @@ The unlock is the part judges will poke at. Build it carefully and test it hard.
 
 1. **An incident is open** (a fall was confirmed in the last `INCIDENT_WINDOW_SECONDS`).
 2. **Sender is on the allowlist** (`CAREGIVER_NUMBERS`).
-3. **The reply contains the one-time code** from the alert text. A fresh 4-digit code is made for each incident and dies when it ends.
+3. **The reply contains the one-time code**, texted only to a caregiver who said they're coming (never in the first alert). A fresh 4-digit code is made for each incident and dies when it ends.
 4. **Fewer than 3 wrong tries** in this incident.
 5. **The command is signed**, fresh (under 10 seconds), and its nonce is new.
 6. **The Pi agrees**: the command names its own open incident, before it opens the latch.

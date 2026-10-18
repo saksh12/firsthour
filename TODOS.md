@@ -50,6 +50,8 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 ## Phase 3: Real integrations (7:00 to 10:30 PM)
 
+- [x] (C/D · Droid) Enable the post-script companion and refine both saved agent prompts (`docs/voice-prompts.md`). Verified: 432 backend tests, 7 frontend tests, stub fall-to-unlock, browser off/retry state, SDK import, and private-agent token minting. Live backend restarted with companion enabled.
+- [ ] (C/D) Live AirPods companion and selective Photon relay after all five questions. Blocked at the latest check by absent Pi heartbeats; no real test call or text placed during companion enablement.
 - [ ] (A+B) `STUB_EDGE=0`: signed events + verified commands; wrong secret rejected
 - [ ] (B) `STUB_STEPFUN=0`, latency logged
 - [x] (C · Droid) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock: stock voice, 6 fixed phrases cached on the port-8002 test backend (`edge/box3-voice`); played live through three knock runs on the real Pi
@@ -120,6 +122,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 ## Other done since #25
 
 - [x] (B · Claude) pytest never reports to the real Sentry project (#29): local runs were filing issues and emails
+- [ ] (C, Devin for Manya) #23 caregiver coordinator: durable inbound cursor, multi-caregiver claim/ETA, Q&A, honest delivery states, ElevenLabs escalation call + signed post-call webhook. Tick after the Mac + Pi + BOX-3 check in docs/manual-test-caregiver-coordinator.md. Not in it: Socket.IO swap, JOIN enrollment, voice note
 - [x] (C) Photon SMS number + Voice profile connected to the ElevenLabs agent "FirstHour Caregiver Line" over SIP/TLS; inbound and outbound test calls passed on a real phone. Backend still has to place the call (#23 item 3)
 - [ ] (C) Rotate the Photon outbound SIP password (it appeared in a setup tool log) and update the ElevenLabs trunk
 
