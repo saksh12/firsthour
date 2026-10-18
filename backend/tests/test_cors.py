@@ -1,9 +1,9 @@
 """CORS for the dashboard and caregiver simulator pages (served from another port)."""
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import create_app, parse_origins
+from conftest import LaptopClient
 from test_api import settings
 
 DASH = "http://localhost:5173"
@@ -20,7 +20,7 @@ def preflight(c, origin, path="/person/answer"):
 
 @pytest.fixture
 def client():
-    return TestClient(create_app(settings()))  # default origins
+    return LaptopClient(create_app(settings()))  # default origins
 
 
 def test_preflight_from_dashboard_origin_allowed(client):
@@ -57,13 +57,13 @@ def test_no_credentials_allowed(client):
 
 def test_custom_origin_list_from_settings():
     lan = "http://192.168.1.20:5173"
-    c = TestClient(create_app(settings(CORS_ORIGINS=f"{lan}/, {DASH}")))
+    c = LaptopClient(create_app(settings(CORS_ORIGINS=f"{lan}/, {DASH}")))
     assert preflight(c, lan).headers.get("access-control-allow-origin") == lan
     assert preflight(c, DASH).headers.get("access-control-allow-origin") == DASH
 
 
 def test_empty_origin_list_disables_cors():
-    c = TestClient(create_app(settings(CORS_ORIGINS="")))
+    c = LaptopClient(create_app(settings(CORS_ORIGINS="")))
     assert "access-control-allow-origin" not in preflight(c, DASH).headers
 
 

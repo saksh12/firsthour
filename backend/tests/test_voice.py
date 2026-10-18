@@ -120,7 +120,7 @@ def test_app_settings_dict_without_key_falls_back_to_env(tmp_path, monkeypatch):
     that made the whole suite call `say` 56 times on a Mac."""
     import os
     from app.main import create_app
-    from fastapi.testclient import TestClient
+    from conftest import LaptopClient
 
     calls = tmp_path / "say_calls"
     fake = tmp_path / "bin"
@@ -131,7 +131,7 @@ def test_app_settings_dict_without_key_falls_back_to_env(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
     monkeypatch.setenv("VOICE_PLAYBACK", "0")
 
-    client = TestClient(create_app({"STUB_EDGE": True, "SHARED_SECRET": "test-secret",
+    client = LaptopClient(create_app({"STUB_EDGE": True, "SHARED_SECRET": "test-secret",
                                     "CAREGIVER_NUMBERS": "+13105550101",
                                     "INCIDENT_WINDOW_SECONDS": 600}))
     import json, time

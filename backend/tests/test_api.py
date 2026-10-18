@@ -5,10 +5,9 @@ import re
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import create_app
-from conftest import CAREGIVER, SECRET, STRANGER, signed_poll
+from conftest import CAREGIVER, SECRET, STRANGER, LaptopClient, signed_poll
 from edge.security import CommandVerifier, sign_event
 
 TS = 1_760_000_000_000
@@ -22,8 +21,8 @@ def settings(**overrides) -> dict:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app(settings()))
+def client() -> LaptopClient:
+    return LaptopClient(create_app(settings()))
 
 
 def post_event(client, type_="fall_suspected", secret=SECRET, ts=TS):
@@ -42,7 +41,7 @@ def test_health_ok_in_stub_mode(client):
 
 
 def test_health_503_without_heartbeat_when_edge_is_live():
-    c = TestClient(create_app(settings(STUB_EDGE=False)))
+    c = LaptopClient(create_app(settings(STUB_EDGE=False)))
     assert c.get("/health").status_code == 503
     post_event(c, "heartbeat")
     assert c.get("/health").status_code == 200
@@ -152,12 +151,12 @@ def test_incident_snapshot_and_events_never_contain_the_code(client, monkeypatch
 
 
 def test_stub_outbox_is_gone_when_photon_is_real():
-    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False)))
     assert c.get("/comms/stub/outbox").status_code == 404
 
 
 def test_real_photon_inbound_only_trusts_the_gateway():
-    c = TestClient(create_app(settings(STUB_PHOTON=False)))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False)))
     msg = {"sender": CAREGIVER, "text": "on my way"}
     assert c.post("/comms/inbound", json=msg).status_code == 401
     assert c.post("/comms/inbound", json=msg, headers={"Authorization": "Bearer nope"}).status_code == 401
@@ -176,7 +175,7 @@ def test_real_photon_alert_goes_to_the_gateway(monkeypatch):
         return {"id": "msg_1", "stubbed": False}
 
     monkeypatch.setattr("app.main.urllib_transport", fake_transport)
-    c = TestClient(create_app(settings(STUB_PHOTON=False, COMMS_GATEWAY_URL="http://gw:8787/")))
+    c = LaptopClient(create_app(settings(STUB_PHOTON=False, COMMS_GATEWAY_URL="http://gw:8787/")))
     post_event(c)
     c.post("/person/answer", json={"text": "help"})
     assert done.wait(2)
@@ -253,3 +252,45 @@ def test_unlock_failed_from_the_pi_reaches_the_dashboard(client):
     assert post_event(client, "unlock_failed").status_code == 200
     ev = list(client.app.state.events)[-1]
     assert ev.type == "device_status" and ev.data == {"device_id": "bath-01", "event": "unlock_failed"}
+
+
+# --- who may press the buttons ------------------------------------------------------
+
+def lan_client(**overrides):
+    from fastapi.testclient import TestClient
+
+    return TestClient(create_app(settings(**overrides)), client=("192.168.1.50", 50000))
+
+
+def test_operator_actions_refused_from_another_device_on_the_wifi():
+    lan = lan_client()
+    app = lan.app
+    laptop = LaptopClient(app)
+    escalate(laptop)
+    assert lan.post("/incident/resolve").status_code == 403
+    assert lan.post("/person/answer", json={"text": "I'm fine"}).status_code == 403
+    assert lan.get("/comms/stub/outbox").status_code == 403  # the alert carries the code
+    assert lan.post("/comms/inbound", json={"sender": CAREGIVER, "text": "UNLOCK 0000"}).status_code == 403
+    assert laptop.get("/incident").json()["state"] == "ALERTING"
+    # Watching still works, and so does the Pi.
+    assert lan.get("/incident").status_code == 200
+    assert signed_poll(lan).status_code == 200
+    assert post_event(lan, "heartbeat").status_code == 200
+
+
+def test_tunnel_reaches_health_only(client):
+    via = {"X-Forwarded-For": "203.0.113.7", "Cf-Connecting-IP": "203.0.113.7"}
+    assert client.get("/health", headers=via).status_code == 200
+    for method, path in [("POST", "/incident/resolve"), ("GET", "/comms/stub/outbox"), ("GET", "/incident"),
+                         ("POST", "/demo/reset"), ("GET", "/edge/commands")]:
+        assert client.request(method, path, headers=via).status_code == 404, path
+    # Each proxy header on its own is enough.
+    assert client.post("/incident/resolve", headers={"X-Forwarded-For": "203.0.113.7"}).status_code == 404
+
+
+def test_dashboard_socket_refused_through_the_tunnel(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/dashboard", headers={"X-Forwarded-For": "203.0.113.7"}) as ws:
+            ws.receive_json()

@@ -96,7 +96,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [x] (A · Claude) 6. Local alarm outlives the unlock window
 - [x] (B · Claude) 7. One StepFun refinement in flight per incident
 - [x] (B · Claude) 8. `scripts/demo_reset.sh` + signed `reset` command
-- [ ] (B) `POST /incident/resolve` has no auth: anyone on the LAN can end an incident, which sends `alarm_off` to the Pi. Gate it like `/demo/reset` or bind the backend to localhost + the Pi's IP
+- [x] (B · Claude) `POST /incident/resolve` has no auth: anyone on the LAN can end an incident, which sends `alarm_off` to the Pi. Gate it like `/demo/reset` or bind the backend to localhost + the Pi's IP
 
 ## Proposed
 

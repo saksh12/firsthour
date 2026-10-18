@@ -6,12 +6,11 @@ import re
 
 import pytest
 import sentry_sdk
-from fastapi.testclient import TestClient
 from sentry_sdk.transport import Transport
 
 from app.main import create_app
 from app.telemetry import Telemetry
-from conftest import CAREGIVER, STRANGER, signed_poll
+from conftest import CAREGIVER, STRANGER, LaptopClient, signed_poll
 from test_api import TS, post_event, settings
 
 FAKE_DSN = "https://public@o0.ingest.example.invalid/1"
@@ -47,7 +46,7 @@ def cap():
 
 
 def app_with(cap, **kw):
-    return TestClient(create_app(settings(SENTRY_DSN=FAKE_DSN, SENTRY_TRANSPORT=cap, **kw)))
+    return LaptopClient(create_app(settings(SENTRY_DSN=FAKE_DSN, SENTRY_TRANSPORT=cap, **kw)))
 
 
 def flush():
@@ -168,14 +167,14 @@ def test_unlock_code_is_redacted_from_any_log(cap):
 
 
 def test_health_supports_head_and_is_not_cached():
-    c = TestClient(create_app(settings()))
+    c = LaptopClient(create_app(settings()))
     r = c.head("/health")
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
 
 
 def test_health_is_503_when_pi_silent_and_edge_live():
-    c = TestClient(create_app(settings(STUB_EDGE=False)))
+    c = LaptopClient(create_app(settings(STUB_EDGE=False)))
     assert c.head("/health").status_code == 503
     post_event(c, "heartbeat")
     assert c.get("/health").status_code == 200

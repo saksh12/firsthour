@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -35,6 +35,24 @@ log = logging.getLogger("firsthour.api")
 HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
 WS_QUEUE_MAX = 200
+# Added by a tunnel (cloudflared, ngrok) or any proxy. The tunnel connects from 127.0.0.1,
+# so without this check the whole internet would look like the laptop.
+PROXY_HEADERS = ("forwarded", "x-forwarded-for", "cf-connecting-ip", "x-real-ip")
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
+def _proxied(headers) -> bool:
+    return any(h in headers for h in PROXY_HEADERS)
+
+
+def laptop_only(request: Request) -> None:
+    """Operator controls (resolve, typed answers, the stub caregiver phone) work only from a
+    browser on the demo laptop. Anyone else on the venue Wi-Fi could cancel an incident,
+    silence the Pi's alarm or read the unlock code. Other devices can still watch."""
+    host = request.client.host if request.client else None
+    if host not in LOOPBACK or _proxied(request.headers):
+        log.warning("operator request refused path=%s client=%s", request.url.path, host)
+        raise HTTPException(status_code=403, detail="operator actions only from the demo laptop")
 DEFAULT_SECRET = "change-me-before-demo"
 # Where the dashboard and caregiver simulator are served from (python3 -m http.server 5173 -d dashboard).
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
@@ -222,6 +240,13 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         telemetry.flush()
 
     app = FastAPI(title="FirstHour backend", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def tunnel_reaches_health_only(request: Request, call_next):
+        # The Sentry uptime tunnel publishes the whole port; only /health may come through it.
+        if _proxied(request.headers) and request.url.path != "/health":
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        return await call_next(request)
     if origins:
         # The dashboard and simulator are static pages on another port; without this the
         # browser blocks their POSTs. Exact origins only, no cookies, only what the pages use.
@@ -288,7 +313,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             telemetry.finish(c.incident_id, f"cmd:{c.id}", picked_up=True)
         return CommandsResponse(commands=pending)
 
-    @app.post("/person/answer")
+    @app.post("/person/answer", dependencies=[Depends(laptop_only)])
     def person_answer(ans: PersonAnswer):
         """What the person on the floor said (speech-to-text, or the operator's typed fallback)."""
         machine.on_answer(ans.text)
@@ -300,7 +325,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         With real Photon only the gateway may post here, because the sender number is
         what the allowlist trusts. In stub mode the simulator page is the caregiver."""
-        if not s["STUB_PHOTON"]:
+        if s["STUB_PHOTON"]:
+            laptop_only(request)  # the simulator page is the caregiver's phone
+        else:
             auth = request.headers.get("Authorization", "")
             if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
                 log.warning("comms inbound rejected: not from the gateway")
@@ -311,7 +338,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     def incident():
         return machine.snapshot()
 
-    @app.post("/incident/resolve")
+    @app.post("/incident/resolve", dependencies=[Depends(laptop_only)])
     def resolve():
         return {"resolved": machine.resolve("operator"), **machine.snapshot()}
 
@@ -338,6 +365,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         """Live events for the dashboard. The first message is a full incident snapshot
         (as an incident_update), then every event in section 6.7 as it happens.
         Nothing sent here contains the unlock code."""
+        if _proxied(ws.headers):
+            await ws.close(code=1008)  # not through the tunnel
+            return
         await ws.accept()
         q: asyncio.Queue = asyncio.Queue(maxsize=WS_QUEUE_MAX)
         clients.add(q)
@@ -356,7 +386,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             clients.discard(q)
             log.info("dashboard disconnected clients=%d", len(clients))
 
-    @app.get("/comms/stub/outbox")
+    @app.get("/comms/stub/outbox", dependencies=[Depends(laptop_only)])
     def stub_outbox():
         """The simulated caregiver phone's inbox. Exists only while STUB_PHOTON=1:
         with real Photon, the alert (and its code) only ever reaches the enrolled phone."""

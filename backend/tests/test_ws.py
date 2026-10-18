@@ -2,10 +2,9 @@
 
 import json
 
-from fastapi.testclient import TestClient
 
 from app.main import create_app
-from conftest import CAREGIVER, STRANGER
+from conftest import CAREGIVER, STRANGER, LaptopClient
 from test_api import post_event, settings
 
 CONTRACT_TYPES = {"incident_update", "triage_update", "message_in", "message_out", "unlock_attempt", "device_status"}
@@ -23,13 +22,13 @@ def read_until(ws, type_, pred=lambda d: True, limit=50):
 
 
 def test_first_message_is_a_snapshot():
-    with TestClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
+    with LaptopClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
         msg = ws.receive_json()
         assert msg == {"type": "incident_update", "data": {"snapshot": True, "state": "IDLE", "incident_id": None}}
 
 
 def test_snapshot_mid_incident_has_clock_and_transcript():
-    with TestClient(create_app(settings())) as c:
+    with LaptopClient(create_app(settings())) as c:
         post_event(c)
         c.post("/person/answer", json={"text": "help"})
         with c.websocket_connect("/ws/dashboard") as ws:
@@ -40,7 +39,7 @@ def test_snapshot_mid_incident_has_clock_and_transcript():
 
 def test_full_incident_streams_contract_events_and_never_the_code(monkeypatch):
     monkeypatch.setattr("app.unlock.secrets.randbelow", lambda n: 4821)
-    with TestClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
+    with LaptopClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
         ws.receive_json()  # snapshot
         post_event(c)
         read_until(ws, "incident_update", lambda d: d["state"] == "CHECKING")
@@ -71,7 +70,7 @@ def test_full_incident_streams_contract_events_and_never_the_code(monkeypatch):
 
 
 def test_device_status_event_on_edge_event():
-    with TestClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
+    with LaptopClient(create_app(settings())) as c, c.websocket_connect("/ws/dashboard") as ws:
         ws.receive_json()
         post_event(c, "help_button")
         msg, _ = read_until(ws, "device_status")
@@ -79,7 +78,7 @@ def test_device_status_event_on_edge_event():
 
 
 def test_two_dashboards_both_get_events():
-    with TestClient(create_app(settings())) as c, \
+    with LaptopClient(create_app(settings())) as c, \
             c.websocket_connect("/ws/dashboard") as a, c.websocket_connect("/ws/dashboard") as b:
         a.receive_json(), b.receive_json()
         post_event(c)
@@ -88,7 +87,7 @@ def test_two_dashboards_both_get_events():
 
 
 def test_disconnect_does_not_break_the_incident_flow():
-    with TestClient(create_app(settings())) as c:
+    with LaptopClient(create_app(settings())) as c:
         with c.websocket_connect("/ws/dashboard") as ws:
             ws.receive_json()
         post_event(c)

@@ -256,7 +256,9 @@ pytest -q                                     # must pass before merging
 # comms gateway
 cd comms-gateway && npm install && npm run dev
 
-# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html)
+# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html).
+# Operator buttons (resolve, typed answers, the stub caregiver phone) work only in a browser on the laptop;
+# other devices can watch. Through the tunnel only /health answers.
 python3 -m http.server 5173 -d dashboard
 
 # edge on the laptop, no hardware
