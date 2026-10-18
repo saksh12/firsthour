@@ -1,6 +1,6 @@
 # FirstHour
 
-A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Arduino hear a fall, check on the person by voice, text a caregiver a triage card, and let help in through a guarded door unlock. It stays safe with the network gone.
+A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an ESP32-S3-BOX-3 sensor hub hear a fall, check on the person by voice, text a caregiver a triage card, and let help in through a guarded door unlock. It stays safe with the network gone.
 
 - [`AGENTS.md`](AGENTS.md): rules and contracts (read first)
 - [`IMPLEMENTATION.md`](IMPLEMENTATION.md): full build plan
@@ -8,56 +8,76 @@ A camera-free fall-response node for a bathroom. A Raspberry Pi (QNX) and an Ard
 
 ## Status
 
-Last updated Sat Oct 17, 8:20 PM.
+Last updated Sun Oct 18, 3:30 AM PDT (after #37).
 
 | Status | Meaning |
 | --- | --- |
 | ✅ | Done and on `main` |
+| ✅ live | Also run on the real hardware (QNX Pi 5 + ESP32-S3-BOX-3) or with real keys |
 | 🔶 | Code exists, never run with real keys or hardware |
 | ⬜ | Not started |
+
+The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` runs on it, and the Pi reads it over raw USB (`sensor_node.py --usb`, pyusb + libusb, QNX has no USB-serial driver). Mac, Pi and BOX-3 connection steps are in [`connect.md`](connect.md); the latest handoff notes are in [`HANDOFF.md`](HANDOFF.md).
 
 ### Demo moments
 
 | Moment | What judges see | Status | What's missing |
 | --- | --- | --- | --- |
-| M1 The thud | Clock starts, sensors spike | 🔶 Works with the fake Arduino | Arduino sketch, real sensors, calibration |
-| M2 The voice | "Are you okay?" spoken, triage follows | 🔶 Audio pipeline works · 🔶 speech input | Says "This is an automated assistant" first; the 8 s silence timer starts when the question has finished playing (checked with macOS `say`). Needs a run with the real ElevenLabs key. Speech input (Chrome push-to-talk + optional Auto-listen) is on the dashboard, checked only with a stubbed recognizer: never run with a real microphone yet. **Keep Auto-listen off** until it starts after the question finishes playing (it can hear the laptop say "…I'm fine…"). Typed box stays as the fallback |
-| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test |
-| M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ Unlock rules, signing, door shows the Pi's confirmation | Arduino sketch (simulated latch, no servo) |
-| M5 Offline | Wi-Fi off: alarm and clock keep going | 🔶 Covered by tests | Real hardware run |
+| M1 The thud | Clock starts, sensors spike | ✅ live on the BOX-3 | `TIME DOWN mm:ss` on the BOX-3 screen and an audible alarm, verified by the operator. Thresholds are **provisional**, from 19 bottle drops on one table (`edge/calibration/`); non-fall checks and the full calibration set are still to do |
+| M2 The voice | "Are you okay?" spoken, triage follows | ✅ live | Real ElevenLabs stock voice plays every fixed line. The person answers out loud: AirPods on the laptop record each answer, and the Pi transcribes it with `whisper.cpp` (QNX AI module, `PI_STT=1`). Live runs on the real Pi passed the help path and the "I'm fine" cancel. The silence timer starts after the question finishes playing. Typed box stays as the fallback |
+| M3 The text | Caregiver phone gets the triage card | ✅ Simulator page · 🔶 real Photon | Caregiver texts the agent line once, then a live test. The caregiver coordinator (#23) is in PR #36 |
+| M4 The door | `UNLOCK <code>` opens the latch, a stranger is refused | ✅ live on the BOX-3 | On the real Pi: a stranger with the right code was refused, the caregiver was accepted, the Pi verified the signed command, the BOX-3 answered `ACK,U`, showed `LATCH OPEN` and relocked by itself. Run with the simulator page, not real Photon |
+| M5 Offline | Wi-Fi off: alarm and clock keep going | ✅ live (backend paused) | With the backend paused, the BOX-3 kept the alarm and clock going and the latch locked; the incident replayed on reconnect. Wi-Fi itself has not been unplugged yet |
 
 ### By part
 
 | Part | What it does | Status | Notes |
 | --- | --- | --- | --- |
 | `backend/` state machine | `IDLE → CHECKING → ALERTING → RESPONDING → UNLOCKED → RESOLVED` | ✅ | Escalation never waits on StepFun |
-| `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ | Full test suite |
-| `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say |
-| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | 🔶 Key works | Triage runs in the background (45 s, one call at a time per incident) after the instant rule record and can never turn an unclear answer into a reassuring "no"; the reply rewrite has its own pool and a 3 s deadline. Measured Oct 18: triage 5-38 s (longest on unclear answers), rewrite 2.3 s |
+| `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ live | Full test suite; checked on the real Pi (M4) |
+| `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say. Dashboard shows "Unclear" for an answer the rules couldn't read, "Not said" for no answer. Hedged amounts like "a little, not very much" are not read yet |
+| `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | ✅ live | Runs in the background (45 s, `max_tokens` 5000, `reasoning_effort` low) after the instant rule record. Rules always win; the model can only add a worrying answer (head strike, can't move, bleeding), never a reassuring one. Late results still add their worrying findings. Measured Oct 18: triage 5-38 s (longest on unclear answers), rewrite 2.3 s |
 | `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
-| `backend/` voice | Speak the fixed questions and caregiver replies | ✅ live | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends. Real ElevenLabs stock voice played live in three knock runs (`STUB_ELEVENLABS=0`) |
+| `backend/` voice | Speak the fixed questions and caregiver replies | ✅ live | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends. Real stock voice played in three knock runs (`STUB_ELEVENLABS=0`) |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
-| `edge/` on the Pi | Same code on QNX 8 (Pi 5), BOX-3 over raw USB | ✅ | See `connect.md`. Details in #22 |
-| QNX AI module | `whisper.cpp` (oss.qnx.com apk, `ggml-base.en`) transcribes the person's answers on the Pi | ✅ live | `PI_STT=1`. Mic on the laptop (AirPods); the Pi fetches each clip signed. Measured whisper 2.7-3.1 s per clip, upload to answer applied 3.8-4.3 s (model comparison in `edge/README.md`). The all-silent recording path is unit-tested only |
-| `arduino/hub.ino` | Sensors, simulated latch (LED), buzzer, display | ⬜ | Need accelerometer chip and display type |
-| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first (a blocked alert is resent on their first text). Gateway replies are HMAC-signed with replay protection (#14) |
+| `edge/` on the Pi | Same code on QNX 8 (Pi 5), BOX-3 over raw USB | ✅ live | Runs detached from SSH (`connect.md`). Raw USB lives in a restartable child process: a BOX-3 reset or USB abort keeps the incident, clock and alarm (verified with SIGKILL and physical RST). SIGTERM stops everything cleanly |
+| QNX AI module | `whisper.cpp` (oss.qnx.com apk, `ggml-base.en`) transcribes the person's answers on the Pi | ✅ live | `PI_STT=1`. Mic on the laptop (the Brio's USB mic fails in QNX `io-snd`); the Pi fetches each clip with a signed request, once. Resident `whisper-server` on loopback, below the reader's priority. Measured whisper 2.7-3.1 s per clip, upload to answer applied 3.8-4.3 s (model comparison in `edge/README.md`). The all-silent recording path is unit-tested only |
+| `arduino/hub/hub.ino` (BOX-3) | IMU, mic peak, screen, alarm, simulated latch | ✅ live | `TIME DOWN`, `LATCH OPEN`/`LATCH LOCKED` with automatic relock, pulsed speaker alarm. No ultrasonic sensor (`distCm` is `-1`) |
+| `comms-gateway/` | Photon 2.0: alert out, caregiver reply in | ✅ stub · 🔶 live path | Keys work; caregiver texts the line once first (a blocked alert is resent on their first text). Gateway replies are HMAC-signed with replay protection (#14). Coordinator work in PR #36 |
 | Phone calls | Photon SMS number → ElevenLabs agent over SIP | 🔶 | Test calls in and out passed; the backend doesn't place the escalation call yet (#23) |
-| `dashboard/` | Live incident page: state, clock, triage + transcript, unlock log | ✅ | Door shows the Pi's confirmation |
-| Speech input | The person answers out loud (Chrome Web Speech API on the dashboard) | 🔶 | Hold the mic button or Space; optional Auto-listen (3 s after each question, gives up after 8 s). Posts to `/person/answer` like the typed box. Verified with a stubbed recognizer only; real-mic test on the demo laptop pending |
+| `dashboard/` | Live incident page: state, clock, triage + transcript, conversation, unlock log | ✅ live | Door shows the Pi's confirmation. Conversation panel shows each spoken line and what the Pi heard |
+| Speech input | The person answers out loud | ✅ live (Pi) · 🔶 Chrome | With `PI_STT=1` the dashboard records after each question (8 s cap, stops early on quiet) and the Pi transcribes. Without it, Chrome Web Speech push-to-talk remains, checked only with a stubbed recognizer; keep its Auto-listen off (it can hear the laptop say "…I'm fine…") |
 | Caregiver simulator | Stand-in phone for the demo | ✅ | `dashboard/caregiver-simulator.html` |
 | `scripts/simulate_fall.py` | Whole story end to end on stubs | ✅ | Passes; `--silent` prints how long escalation took |
-| `scripts/demo_reset.sh` | One-command reset between runs | ✅ | Backend to IDLE + signed `reset` to the Pi; 3 back-to-back `simulate_fall.py` runs pass |
-| Calibration | Thresholds from ~20 trials per action | ⬜ | `edge/calibrate.py` record + analyze (#15); placeholder numbers in `edge/config.py` until real trials |
+| `scripts/demo_reset.sh` | One-command reset between runs | ✅ live | Backend to IDLE + signed `reset` to the Pi (latch locked, alarm off, `READY`) |
+| Calibration | Thresholds from ~20 trials per action | 🔶 Provisional | 19 bottle drops recorded on the BOX-3 (`edge/calibrate.py`); demo values live only in the Pi's `.env`. Non-fall trials and repo defaults still to do |
 | Handoff sheet page | Paramedic summary | ⬜ | |
-| Docs | `docs/sentry-story.md` started; demo script, Devpost draft | 🔶 / ⬜ | |
+| Docs | `docs/sentry-story.md` started; demo script and Devpost draft in PR #31 | 🔶 | |
 | Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
+
+Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **390 passed** (Oct 18, #37).
+
+### Still open
+
+- Process split of the Pi safety node into separate QNX processes (#22 step 1).
+- Real Photon text out and reply in; the backend placing the escalation call (#23, PR #36).
+- Non-fall checks and full calibration; unplugging Wi-Fi for M5; an all-silent Pi speech run.
+- Sentry uptime monitor on the tunnel; handoff sheet page; Paper or Base44.
+- Rotate `PHOTON_SIP_OUTBOUND_PASSWORD`.
 
 ### Decided
 
-- **Speech input is the browser's Web Speech API** in Chrome on the laptop (`dashboard/index.html`). Privacy: Chrome's speech recognition sends audio to Google's service; nothing is recorded or stored by FirstHour. Other browsers show "Speech input needs Chrome" and keep the typed box.
+- **Speech input is transcribed on the Pi** by `whisper.cpp` (`PI_STT=1`, `ggml-base.en`). The laptop only records; clips stay in backend memory until the Pi fetches them once, and the words are never logged. Chrome Web Speech remains as the fallback when `PI_STT=0` (Chrome sends that audio to Google's service).
+- **The question script stays fixed.** Real-time conversation is for the caregiver (ElevenLabs agent over Photon, #23), not the person on the floor.
+- **No NFC reader and no servo** at the event. NFC is dropped. The latch is simulated on the BOX-3 screen: the Pi verifies the signed command and tells the hub to open; the Mac shows the door only after the Pi confirms.
+- **Start demo runs with a knock**, not BOOT: BOOT sends `help_button`, which skips the first question.
 
-- **No NFC reader and no servo** at the event. NFC is dropped. The latch is simulated: the Pi verifies the signed command and tells the Arduino to open; the Mac shows the door only after the Pi confirms.
+### Changed in #32 to #37
 
+- **#32-#33:** BOX-3 firmware: sensors, screen (`TIME DOWN`, latch status), pulsed alarm, simulated latch with automatic relock. The Pi reads it over raw USB.
+- **#34:** BOX-3 calibration recordings (19 bottle drops) and `edge/calibrate.py` USB recording.
+- **#35:** USB isolated in a restartable child process, so a BOX-3 reset can't take down the safety process.
+- **#37:** QNX AI module (`whisper.cpp` on the Pi), live StepFun with the "worrying only" merge, live ElevenLabs, dashboard Conversation panel and "Unclear" label, SIGTERM stops the reader and whisper-server cleanly.
 ### Changed in #25: what you need to do
 
 #25 fixed the review bugs in #21. Four of the changes affect how you work:
@@ -94,7 +114,8 @@ Other changes:
 | `CAREGIVER_NUMBERS` | ✅ Real phone; it must text the agent line once |
 | `PHOTON_SMS_NUMBER`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID` | ✅ Test calls both ways passed (Anmol's `.env`; added to `.env.example` with the code that reads them) |
 | `PHOTON_SIP_OUTBOUND_PASSWORD` | ⚠️ Rotate it: it appeared in a setup tool log |
-| `SERIAL_PORT` | ⬜ When the Arduino arrives |
+| `SERIAL_PORT` | Not needed: the BOX-3 is read over raw USB (`--usb`) |
+| `PI_STT`, `WHISPER_MODEL` | ✅ `PI_STT=1` on the backend; `WHISPER_MODEL` set on the Pi at launch (`connect.md`) |
 
 ## Run it locally (no hardware)
 
