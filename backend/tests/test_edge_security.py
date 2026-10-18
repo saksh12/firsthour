@@ -102,3 +102,19 @@ def test_14_edge_logs_every_decision_with_reason(verifier, clock, caplog):
     lines = [r.getMessage() for r in caplog.records if r.name == "firsthour.edge.security"]
     assert len(lines) == 3
     assert "ok" in lines[0] and "replay" in lines[1] and "no local incident" in lines[2]
+
+
+# --- signed poll (GET /edge/commands) ---------------------------------------------
+
+def test_poll_signature_matches_on_both_sides(clock):
+    from app.security import sign_poll as backend_sign, verify_poll
+    from edge.security import sign_poll
+
+    ts = clock.ms()
+    sig = sign_poll(SECRET, ts, "bath-01")
+    assert sig == backend_sign(SECRET, ts, "bath-01")
+    assert verify_poll(SECRET, "bath-01", ts, sig, last_ts=0, now_ms=ts) == (True, "ok")
+    assert verify_poll(SECRET, "bath-02", ts, sig, last_ts=0, now_ms=ts) == (False, "bad signature")
+    assert verify_poll(SECRET, "bath-01", ts, None, last_ts=0, now_ms=ts) == (False, "missing signature")
+    assert verify_poll(SECRET, "bath-01", ts, sig, last_ts=0, now_ms=ts + 10_001) == (False, "stale")
+    assert verify_poll(SECRET, "bath-01", ts, sig, last_ts=ts, now_ms=ts) == (False, "replay")

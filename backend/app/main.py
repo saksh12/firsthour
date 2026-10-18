@@ -5,6 +5,7 @@ TODO(phase 1, C): voice.py replaces `speak`.
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -24,16 +25,35 @@ from pydantic import BaseModel, ValidationError
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import ReplayCache, make_command, verify_event, verify_inbound
+from .security import ReplayCache, make_command, verify_event, verify_inbound, verify_poll
 from .telemetry import Telemetry
-from .triage import StepFun, urllib_transport
+from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
+from .voice import ASSISTANT_LINE, DEFAULT_MODEL as DEFAULT_VOICE_MODEL, TTS_BASE_URL, Voice, line_ref
 
 log = logging.getLogger("firsthour.api")
 
 HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
 WS_QUEUE_MAX = 200
+# Added by a tunnel (cloudflared, ngrok) or any proxy. The tunnel connects from 127.0.0.1,
+# so without this check the whole internet would look like the laptop.
+PROXY_HEADERS = ("forwarded", "x-forwarded-for", "cf-connecting-ip", "x-real-ip")
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
+def _proxied(headers) -> bool:
+    return any(h in headers for h in PROXY_HEADERS)
+
+
+def laptop_only(request: Request) -> None:
+    """Operator controls (resolve, typed answers, the stub caregiver phone) work only from a
+    browser on the demo laptop. Anyone else on the venue Wi-Fi could cancel an incident,
+    silence the Pi's alarm or read the unlock code. Other devices can still watch."""
+    host = request.client.host if request.client else None
+    if host not in LOOPBACK or _proxied(request.headers):
+        log.warning("operator request refused path=%s client=%s", request.url.path, host)
+        raise HTTPException(status_code=403, detail="operator actions only from the demo laptop")
 DEFAULT_SECRET = "change-me-before-demo"
 # Where the dashboard and caregiver simulator are served from (python3 -m http.server 5173 -d dashboard).
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
@@ -59,6 +79,12 @@ def load_settings() -> dict:
         "STEPFUN_BASE_URL": os.getenv("STEPFUN_BASE_URL", ""),
         "STEPFUN_MODEL": os.getenv("STEPFUN_MODEL", "step-5-preview"),
         "SENTRY_DSN": os.getenv("SENTRY_DSN", ""),
+        "STUB_ELEVENLABS": os.getenv("STUB_ELEVENLABS", "1") == "1",
+        "ELEVENLABS_API_KEY": os.getenv("ELEVENLABS_API_KEY", ""),
+        "ELEVENLABS_VOICE_ID": os.getenv("ELEVENLABS_VOICE_ID", ""),
+        "ELEVENLABS_MODEL": os.getenv("ELEVENLABS_MODEL", ""),
+        "ELEVENLABS_BASE_URL": os.getenv("ELEVENLABS_BASE_URL", ""),
+        "VOICE_PLAYBACK": os.getenv("VOICE_PLAYBACK", "1") == "1",
     }
 
 
@@ -83,6 +109,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     queues: dict[str, list] = defaultdict(list)
     last_heartbeat: dict[str, float] = {}
+    last_poll_ts: dict[str, int] = {}
     events: deque = deque(maxlen=500)
     outbox: list[dict] = []
     spoken: deque = deque(maxlen=100)
@@ -119,9 +146,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             log.warning("dashboard client dropped, queue full")
 
     def speak(text: str) -> None:
-        # TODO(C): voice.py plays cached ElevenLabs audio here.
         spoken.append(text)
-        log.info("say %r", text)
+        # Never log the line: a caregiver's rewritten reply is private.
+        log.info("say ref=%s", line_ref(text))
+        voice.speak(text)
 
     def deliver(incident_id: str, to: list[str], text: str) -> None:
         with telemetry.span(incident_id, "photon_send", stub=False):
@@ -174,6 +202,19 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
+    voice = Voice(
+        # A settings dict that omits the key falls back to the env var (conftest
+        # sets VOICE_PLAYBACK=0 so test apps stay silent); default is on.
+        playback=s.get("VOICE_PLAYBACK", os.getenv("VOICE_PLAYBACK", "1") == "1"),
+        stub=s.get("STUB_ELEVENLABS", True),
+        api_key=s.get("ELEVENLABS_API_KEY", ""), voice_id=s.get("ELEVENLABS_VOICE_ID", ""),
+        model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
+        base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,
+        span=lambda **kw: telemetry.span(current_incident_id(), "voice", **kw),
+        **({"transport": s["VOICE_TRANSPORT"], "player": s["VOICE_PLAYER"]}
+           if "VOICE_TRANSPORT" in s else {}),  # tests only
+    )
+    log.info("voice: %s", "ElevenLabs real" if voice.real else "stub (say/log only)")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
                               emit=emit, on_close=close_on_pi, speak=speak,
                               send_alert=send_alert,
@@ -191,13 +232,23 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     log.exception("tick failed")
                 await asyncio.sleep(TICK_S)
 
+        # Pre-generate the fixed script so the first question plays with no API call.
+        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE])
         task = asyncio.create_task(ticker())
         yield
         task.cancel()
+        voice.stop()
         loop_ref["loop"] = None
         telemetry.flush()
 
     app = FastAPI(title="FirstHour backend", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def tunnel_reaches_health_only(request: Request, call_next):
+        # The Sentry uptime tunnel publishes the whole port; only /health may come through it.
+        if _proxied(request.headers) and request.url.path != "/health":
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        return await call_next(request)
     if origins:
         # The dashboard and simulator are static pages on another port; without this the
         # browser blocks their POSTs. Exact origins only, no cookies, only what the pages use.
@@ -205,6 +256,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                            allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
         log.info("CORS allowed origins=%s", origins)
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
+    app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
     app.state.inbound_replays = inbound_replays
 
@@ -254,14 +306,21 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 
     @app.get("/edge/commands", response_model=CommandsResponse)
-    def edge_commands(device_id: str):
+    def edge_commands(device_id: str, request: Request, ts: Optional[int] = None):
+        # Signed poll: otherwise anyone on the Wi-Fi could poll first and swallow the unlock.
+        ok, reason = verify_poll(secret, device_id, ts, request.headers.get("X-Signature"),
+                                 last_poll_ts.get(device_id, 0))
+        if not ok:
+            log.warning("edge poll rejected device_id=%s reason=%s", device_id, reason)
+            raise HTTPException(status_code=401, detail=reason)
+        last_poll_ts[device_id] = ts
         # Commands are signed and single-use, so handing them out once is enough.
         pending, queues[device_id] = queues[device_id], []
         for c in pending:
             telemetry.finish(c.incident_id, f"cmd:{c.id}", picked_up=True)
         return CommandsResponse(commands=pending)
 
-    @app.post("/person/answer")
+    @app.post("/person/answer", dependencies=[Depends(laptop_only)])
     def person_answer(ans: PersonAnswer):
         """What the person on the floor said (speech-to-text, or the operator's typed fallback)."""
         machine.on_answer(ans.text)
@@ -273,7 +332,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         The gateway signs with X-Signature/X-Timestamp (section 6.6). The
         dashboard and simulator pages are unsigned, which is only allowed
-        while STUB_PHOTON=1; a presented signature is always checked.
+        while STUB_PHOTON=1 and only from this laptop; a presented signature
+        is always checked.
         """
         raw = await request.body()
         signature = request.headers.get("X-Signature")
@@ -281,6 +341,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             if not s["STUB_PHOTON"]:
                 log.warning("inbound rejected reason=missing signature")
                 raise HTTPException(status_code=401, detail="missing signature")
+            laptop_only(request)  # the simulator page is the caregiver's phone
         else:
             ok, reason = verify_inbound(secret, raw, signature,
                                         request.headers.get("X-Timestamp"))
@@ -306,21 +367,43 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         except ValidationError as e:
             log.warning("inbound rejected reason=malformed errors=%d", e.error_count())
             raise HTTPException(status_code=422, detail="malformed inbound message")
+
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")
     def incident():
         return machine.snapshot()
 
-    @app.post("/incident/resolve")
+    @app.post("/incident/resolve", dependencies=[Depends(laptop_only)])
     def resolve():
         return {"resolved": machine.resolve("operator"), **machine.snapshot()}
+
+    @app.post("/demo/reset")
+    def demo_reset(request: Request):
+        """scripts/demo_reset.sh between demo runs: back to IDLE, and a signed `reset` to
+        each Pi (lock, alarm off, clear the fusion cooldown, READY). The Pi obeys it only
+        with no local incident open; the resolve below queues alarm_off for that first."""
+        auth = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
+            log.warning("demo reset rejected: no token")
+            raise HTTPException(status_code=401, detail="token required")
+        inc = machine.incident
+        devices = set(last_heartbeat) | ({inc.device_id} if inc else set())
+        machine.resolve("demo reset")
+        for device_id in sorted(devices):
+            cmd = make_command(secret, "reset", "")
+            queues[device_id].append(cmd)
+            log.info("command queued action=reset device_id=%s id=%s", device_id, cmd.id)
+        return {"devices": sorted(devices), **machine.snapshot()}
 
     @app.websocket("/ws/dashboard")
     async def ws_dashboard(ws: WebSocket):
         """Live events for the dashboard. The first message is a full incident snapshot
         (as an incident_update), then every event in section 6.7 as it happens.
         Nothing sent here contains the unlock code."""
+        if _proxied(ws.headers):
+            await ws.close(code=1008)  # not through the tunnel
+            return
         await ws.accept()
         q: asyncio.Queue = asyncio.Queue(maxsize=WS_QUEUE_MAX)
         clients.add(q)
@@ -339,7 +422,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             clients.discard(q)
             log.info("dashboard disconnected clients=%d", len(clients))
 
-    @app.get("/comms/stub/outbox")
+    @app.get("/comms/stub/outbox", dependencies=[Depends(laptop_only)])
     def stub_outbox():
         """The simulated caregiver phone's inbox. Exists only while STUB_PHOTON=1:
         with real Photon, the alert (and its code) only ever reaches the enrolled phone."""

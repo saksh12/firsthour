@@ -56,7 +56,7 @@ There is no servo motor, so the door latch is simulated, and the security chain 
 1. The backend grants an unlock and queues a **signed** `unlock` command (all unlock rules below).
 2. The Pi verifies it (signature, freshness, nonce, **its own** open incident) and sends `U` to the Arduino.
 3. The Arduino "opens the latch": it lights the latch LED (if wired), answers `ACK,U` and relocks itself after `UNLOCK_HOLD_SECONDS`.
-4. The Pi reports `local_unlock` to the backend, and **the Mac shows the door opening** (dashboard door panel).
+4. On `ACK,U` the Pi reports `local_unlock` to the backend, and **the Mac shows the door opening** (dashboard door panel). No ACK within `UNLOCK_ACK_TIMEOUT_S`: the Pi reports `unlock_failed` and the door panel says so.
 
 The Mac only ever shows what the Pi reports, never the backend's grant: until the Pi confirms, the dashboard says "Unlocking…". Never fake the opening on the Mac from the grant alone.
 
@@ -144,13 +144,13 @@ Grow a file before you split it. Do not add packages, layers or abstractions tha
 | --- | --- |
 | `device_id` | e.g. `bath-01` |
 | `ts` | epoch ms |
-| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Pi opened the latch) \| `cancelled` |
+| `type` | `fall_suspected` \| `heartbeat` \| `help_button` \| `local_unlock` (the Arduino answered `ACK,U`) \| `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`) \| `cancelled` |
 | `sensors` | `{sound_peak, accel_delta_g, dist_cm}` |
 | `local_incident_id` | `<device_id>-<ts>` |
 
 Header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
-**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01` every 1 s. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display`. `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
+**Backend → Pi**: Pi polls `GET /edge/commands?device_id=bath-01&ts=<ms>` every 1 s, header `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id))`. A missing, bad, stale (> 10 s) or replayed (`ts` not newer than the last accepted poll) signature gets 401 and leaves the queue alone. Response `{"commands": [...]}`, each with `id, action, incident_id, ts, nonce, sig`. `action` is `unlock` \| `lock` \| `alarm_on` \| `alarm_off` \| `display` \| `reset` (demo reset: lock, alarm off, clear the fusion cooldown, `READY`; obeyed only with no local incident open; `incident_id` is `""`). `sig = hex(HMAC_SHA256(SHARED_SECRET, "action|incident_id|ts|nonce"))`.
 
 **Incident states**: `IDLE` → `CHECKING` → (`CANCELLED` on "I'm fine" | `ALERTING` on help or 8 s silence) → `RESPONDING` on any caregiver reply → `UNLOCKED` on accepted unlock → `RESOLVED` → `IDLE`.
 
@@ -182,6 +182,8 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 - Fusion: suspected fall when sound peak and accelerometer delta both cross their thresholds within `WINDOW_MS = 400`.
 - 30-second cooldown after each event, so one fall can't trigger twice.
 - **Thresholds come from calibration data**, not guesses: ~20 trials each of `fall_beanbag`, `sit_mat`, `bottle_drop`, `door_slam`, `footsteps`, `clap`, logged to CSV with labels. Commit the final numbers in `edge/config.py`. Recheck in the demo room.
+- The local incident and alarm have no timeout: they stay up until a signed `alarm_off` (a clear "I'm fine", a resolve) or a demo `reset`. Only unlocks expire with the window.
+- HTTP runs on its own thread; the sensor loop never waits on the network.
 - On `fall_suspected` the Pi, **before any network call**: opens a local incident, starts the clock, turns the buzzer on, shows `TIME DOWN mm:ss`. Then it tries to POST. Unreachable backend → keep going locally, log to file, replay when the network returns.
 
 ## Latency (measure everything in Sentry; quote only measured numbers)
@@ -190,7 +192,8 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 | --- | --- |
 | Thud → `TIME DOWN` on display | Local only, no network in path |
 | Fall event → "Are you okay?" plays | Pre-cached audio, no model or TTS call in path |
-| StepFun triage call | Hard timeout **3 s**, then rule-based fallback |
+| StepFun triage call | Runs in the background after the instant rule-based record (which drives escalation and the alert). Hard timeout **15 s**, then the rule record stays. Measured 5-13 s on `low` |
+| StepFun reply rewrite | Hard timeout **3 s**, then the original text. Measured 1-1.8 s with the "answer immediately" prompt |
 | Unlock reply → latch opens (Pi `local_unlock`) | ≤ ~1 s poll + verify; measure it |
 | Fall → caregiver text delivered | Measure it |
 
@@ -253,11 +256,14 @@ pytest -q                                     # must pass before merging
 # comms gateway
 cd comms-gateway && npm install && npm run dev
 
-# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html)
+# dashboard (static pages; the caregiver simulator is dashboard/caregiver-simulator.html).
+# Operator buttons (resolve, typed answers, the stub caregiver phone) work only in a browser on the laptop;
+# other devices can watch. Through the tunnel only /health answers.
 python3 -m http.server 5173 -d dashboard
 
 # edge on the laptop, no hardware
 python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin   # type f + Enter for a fall, b for the help button
+                                              # stdin fakes the latch's ACK,U; --no-ack simulates a dead latch
 
 # fake a fall end to end (stubs)
 python3 scripts/simulate_fall.py

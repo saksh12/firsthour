@@ -224,11 +224,13 @@ D,<text>   # show short text on LCD/segment display
 }
 ```
 
-`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `local_unlock` (the Pi opened the latch), `cancelled`.
+`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `local_unlock` (the Arduino confirmed with `ACK,U`), `unlock_failed` (no `ACK,U` within `UNLOCK_ACK_TIMEOUT_S`), `cancelled`.
 
 Header: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
-### 6.3 Backend to edge (Pi polls `GET /edge/commands?device_id=bath-01` every 1 second)
+### 6.3 Backend to edge (Pi polls `GET /edge/commands?device_id=bath-01&ts=<ms>` every 1 second)
+
+The poll is signed: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + device_id))`. The backend answers 401 and keeps the queue when the signature is missing or wrong, `ts` is more than 10 seconds off, or `ts` is not newer than the last accepted poll from that device. Otherwise anyone on the Wi-Fi could poll first and swallow the unlock.
 
 ```json
 {
@@ -245,7 +247,7 @@ Header: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 }
 ```
 
-`action` is one of: `unlock`, `lock`, `alarm_on`, `alarm_off`, `display`.
+`action` is one of: `unlock`, `lock`, `alarm_on`, `alarm_off`, `display`, `reset`. `reset` (demo reset, `incident_id` `""`) locks, turns the alarm off, clears the fusion cooldown and shows `READY`; the Pi obeys it only when no local incident is open.
 
 The Pi **must** check: signature valid, `ts` within 10 seconds, nonce not seen before, and (for `unlock`) a local incident is open.
 
@@ -727,8 +729,8 @@ def parse_answers(transcript: str, profile: dict) -> dict:
         response_format={"type": "json_object"},
         temperature=0.1,
         max_tokens=300,
-        timeout=3,
-        # check the StepFun docs for the parameter that sets LOW reasoning effort and use it
+        timeout=15,                 # background only: the rule-based record already escalated
+        reasoning_effort="low",     # documented for step-5-preview
     )
     data = json.loads(resp.choices[0].message.content)
     data["on_blood_thinner"] = profile["on_blood_thinner"]   # from the profile, never the model
@@ -737,7 +739,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.4 Safety rails
 
-- **3-second timeout.** On timeout or bad JSON, fall back to **rule-based parsing** (keywords like "head", "hip", "can't move", "no") and a templated summary. The demo never waits on the model.
+- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **15-second timeout** (measured 5-13 s); on timeout or bad JSON the rule record stays. The demo never waits on the model.
 - **Validate the output** with a pydantic model before using it.
 - **The medication list comes from the profile**, entered by a caregiver, not from the model.
 - **Show the raw transcript** next to the record on the dashboard. Users can see and correct what the AI understood. StepFun's judges look for reliability and for users understanding and controlling the workflow.
@@ -745,7 +747,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.5 Caregiver reply rewrite
 
-Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information." Fall back to reading the original if the call fails.
+Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line stops `step-5-preview` from reasoning first (measured 1-1.8 s instead of 6-12 s). **3-second timeout**; fall back to reading the original if the call fails.
 
 ---
 

@@ -93,8 +93,8 @@ class FakeHttp:
             raise OSError("network down")
         return self.status, {"ok": True}
 
-    def get(self, path):
-        self.calls.append(("GET", path))
+    def get(self, path, headers=None):
+        self.calls.append(("GET", path, headers))
         if not self.online:
             raise OSError("network down")
         cmds, self.commands = self.commands, []
@@ -118,6 +118,12 @@ def node(tmp_path, clock, calls, http):
                 outbox_path=tmp_path / "outbox.jsonl", clock=clock,
                 sound_t=400, accel_t=1.0, window_ms=400, cooldown_s=30,
                 incident_window_s=600, poll_s=1, heartbeat_s=5, backoff_s=5)
+
+
+def step(node):
+    """One pass of both loops: the network thread, then the sensor loop."""
+    node.network_step(node._clock())
+    node.tick()
 
 
 def serial(calls):
@@ -145,8 +151,9 @@ def test_boot_shows_ready(node, calls):
 def test_fall_raises_local_alarm_before_any_network_call(node, calls):
     fall(node)
     assert serial(calls)[-2:] == ["A1", "D,TIME DOWN 00:00"]
+    node.tick()  # the sensor loop alone never touches the network
     assert not any(c[0] in ("POST", "GET") for c in calls)  # nothing sent yet
-    node.tick()
+    step(node)
     events = posted(calls)
     assert events[0]["type"] == "fall_suspected"
     assert events[0]["sensors"]["sound_peak"] == 850 and events[0]["sensors"]["accel_delta_g"] > 1.0
@@ -155,7 +162,7 @@ def test_fall_raises_local_alarm_before_any_network_call(node, calls):
 
 def test_events_are_signed_so_the_backend_accepts_them(node, calls):
     fall(node)
-    node.tick()
+    step(node)
     _, _, raw, headers = next(c for c in calls if c[0] == "POST")
     assert verify_event(SECRET, raw, headers["X-Signature"]) == (True, "ok")
 
@@ -170,14 +177,14 @@ def test_clap_or_stomp_does_not_open_an_incident(node, calls):
 def test_clock_counts_on_the_display(node, calls, clock):
     fall(node)
     clock.advance(65)
-    node.tick()
+    step(node)
     assert "D,TIME DOWN 01:05" in serial(calls)
 
 
 def test_offline_alarm_still_works_and_events_wait_in_the_outbox(node, calls, http, tmp_path, clock):
     http.online = False
     fall(node)
-    node.tick()
+    step(node)
     assert "A1" in serial(calls) and node.incident
     assert len(node.outbox) == 1
     # persisted, so a restart doesn't lose it
@@ -186,7 +193,7 @@ def test_offline_alarm_still_works_and_events_wait_in_the_outbox(node, calls, ht
     # backoff: no hammering the dead network every tick
     n = len(calls)
     clock.advance(1)
-    node.tick()
+    step(node)
     assert not any(c[0] in ("POST", "GET") for c in calls[n:])
 
     # help button while offline: still queued, in order
@@ -195,7 +202,7 @@ def test_offline_alarm_still_works_and_events_wait_in_the_outbox(node, calls, ht
     # network returns: everything replays in order, then the outbox is empty
     http.online = True
     clock.advance(5)
-    node.tick()
+    step(node)
     types = [e["type"] for e in posted(calls) if e["type"] != "heartbeat"]
     assert types[-2:] == ["fall_suspected", "help_button"]
     assert len(node.outbox) == 0
@@ -205,15 +212,15 @@ def test_heartbeats_are_not_queued_while_offline(node, http, clock):
     http.online = False
     for _ in range(5):
         clock.advance(6)
-        node.tick()
+        step(node)
     assert len(node.outbox) == 0
 
 
 def test_rejected_event_is_dropped_not_retried_forever(node, http, calls):
     http.status = 401
     fall(node)
-    node.tick()
-    node.tick()
+    step(node)
+    step(node)
     assert len(node.outbox) == 0
     assert sum(1 for e in posted(calls) if e["type"] == "fall_suspected") == 1
 
@@ -222,20 +229,64 @@ def cmd(clock, action, incident_id, secret=SECRET):
     return make_command(secret, action, incident_id, now_ms=clock.ms()).model_dump()
 
 
-def test_backend_unlock_command_moves_the_servo_and_reports_it(node, calls, http, clock):
+def types(calls):
+    return [e["type"] for e in posted(calls)]
+
+
+def test_unlock_is_reported_only_after_the_latch_acks(node, calls, http, clock):
     fall(node)
     http.commands = [cmd(clock, "unlock", node.incident["id"])]
-    node.tick()
+    step(node)
     assert serial(calls)[-1] == "U"
     clock.advance(1)
-    node.tick()
-    # The dashboard shows the door open only once the Pi says it moved the servo.
-    assert "local_unlock" in [e["type"] for e in posted(calls)]
+    step(node)
+    # The dashboard shows the door open only once the Arduino confirms the latch.
+    assert "local_unlock" not in types(calls)
+    node.handle_line("ACK,U")
+    clock.advance(1)
+    step(node)
+    assert "local_unlock" in types(calls) and "unlock_failed" not in types(calls)
+
+
+def test_no_ack_reports_unlock_failed_never_local_unlock(node, calls, http, clock):
+    fall(node)
+    http.commands = [cmd(clock, "unlock", node.incident["id"])]
+    step(node)
+    clock.advance(2.5)  # past UNLOCK_ACK_TIMEOUT_S
+    step(node)
+    step(node)
+    node.handle_line("ACK,U")  # too late: logged, not reported
+    clock.advance(1)
+    step(node)
+    assert "unlock_failed" in types(calls) and "local_unlock" not in types(calls)
+
+
+def test_poll_is_signed_with_a_rising_ts(node, calls, http, clock):
+    from app.security import verify_poll
+
+    step(node)
+    clock.advance(1)
+    step(node)
+    gets = [c for c in calls if c[0] == "GET"]
+    assert len(gets) == 2
+    last = 0
+    for _, path, headers in gets:
+        ts = int(path.split("ts=")[1])
+        assert path.startswith("/edge/commands?device_id=bath-01&")
+        assert verify_poll(SECRET, "bath-01", ts, headers["X-Signature"], last, now_ms=clock.ms()) == (True, "ok")
+        last = ts
+
+
+def test_rejected_poll_is_logged_not_treated_as_offline(node, http, clock, caplog):
+    http.get = lambda path, headers=None: (401, {"detail": "bad signature"})
+    with caplog.at_level("ERROR", logger="firsthour.edge"):
+        step(node)
+    assert node.online is True and "command poll rejected status=401" in caplog.text
 
 
 def test_unlock_without_local_incident_refused(node, calls, http, clock):
     http.commands = [make_command(SECRET, "unlock", "inc-1", now_ms=clock.ms()).model_dump()]
-    node.tick()
+    step(node)
     assert "U" not in serial(calls)
 
 
@@ -244,18 +295,18 @@ def test_forged_and_replayed_commands_refused(node, calls, http, clock):
     good = cmd(clock, "unlock", node.incident["id"])
     forged = cmd(clock, "unlock", node.incident["id"], secret="wrong")
     http.commands = [forged]
-    node.tick()
+    step(node)
     assert "U" not in serial(calls)
     http.commands = [good, good]
     clock.advance(1)
-    node.tick()
+    step(node)
     assert serial(calls).count("U") == 1
 
 
 def test_alarm_off_closes_the_local_incident(node, calls, http, clock):
     fall(node)
     http.commands = [cmd(clock, "alarm_off", node.incident["id"])]
-    node.tick()
+    step(node)
     assert node.incident is None
     assert serial(calls)[-2:] == ["A0", "D,READY"]
 
@@ -264,7 +315,7 @@ def test_commands_for_a_stale_backend_incident_are_ignored(node, calls, http, cl
     # Issue #13 bug 2, reproduced live: resolving a stale backend incident silenced a new fall.
     fall(node)
     http.commands = [cmd(clock, "alarm_off", "bath-01-1"), cmd(clock, "unlock", "bath-01-1")]
-    node.tick()
+    step(node)
     assert node.incident is not None
     assert "A0" not in serial(calls) and "U" not in serial(calls)
 
@@ -282,21 +333,94 @@ def test_non_json_response_counts_as_offline_not_a_crash(node, calls, clock, mon
     monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: Resp())
     node.http = UrlHttp("http://backend", 1)
     fall(node)
-    node.tick()
+    step(node)
     assert node.online is False and len(node.outbox) == 1 and node.incident
 
 
-def test_local_incident_expires_after_the_window(node, calls, clock):
+def test_alarm_outlives_the_window_but_unlocks_do_not(node, calls, http, clock):
     fall(node)
     clock.advance(601)
-    node.tick()
-    assert node.incident is None and serial(calls)[-1] == "D,READY"
+    http.commands = [cmd(clock, "unlock", node.incident["id"])]
+    step(node)
+    assert node.incident is not None
+    assert "A0" not in serial(calls) and "D,READY" not in serial(calls)[1:]
+    assert serial(calls)[-1] == "D,TIME DOWN 10:01"
+    assert "U" not in serial(calls)
+
+
+def test_reset_with_no_incident_locks_and_clears_the_cooldown(node, calls, http, clock):
+    fall(node, ms=2000)
+    http.commands = [cmd(clock, "alarm_off", node.incident["id"]), cmd(clock, "reset", "")]
+    step(node)
+    assert node.incident is None
+    assert serial(calls)[-3:] == ["L", "A0", "D,READY"]
+    fall(node, ms=6000)  # 4 s later: inside the old 30 s cooldown
+    assert node.incident is not None
+
+
+def test_reset_is_refused_while_a_local_incident_is_open(node, calls, http, clock):
+    fall(node)
+    http.commands = [cmd(clock, "reset", "")]
+    step(node)
+    assert node.incident is not None and "L" not in serial(calls)
+
+
+def test_stdin_source_fakes_the_latch_ack():
+    from edge.sensor_node import StdinSource
+
+    src = StdinSource()
+    src.write("U")
+    assert src.readline(0) == "ACK,U"
+    dead = StdinSource(auto_ack=False)
+    dead.write("U")
+    assert dead._replies == []
+
+
+def test_slow_backend_does_not_stall_the_sensor_loop(tmp_path):
+    """Issue #21.5: every HTTP call hangs 0.5 s; the sensor loop keeps its cadence."""
+    import threading
+    import time
+
+    class SlowHttp:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, path, raw, headers):
+            self.calls += 1
+            time.sleep(0.5)
+            return 200, {}
+
+        def get(self, path, headers=None):
+            self.calls += 1
+            time.sleep(0.5)
+            return 200, {"commands": []}
+
+    writes, http = [], SlowHttp()
+    node = Node(device_id="bath-01", secret=SECRET, write_serial=writes.append, http=http,
+                outbox_path=tmp_path / "o.jsonl", sound_t=400, accel_t=1.0, poll_s=0.1, heartbeat_s=0.1)
+    node.start_network(interval_s=0.01)
+    try:
+        settle(node)
+        node.handle_line(THUD.format(ms=2000))
+        worst, t_end, ms = 0.0, time.time() + 1.5, 3000
+        while time.time() < t_end:
+            t0 = time.time()
+            node.handle_line(QUIET.format(ms=ms))
+            node.tick()
+            worst = max(worst, time.time() - t0)
+            ms += 50
+            time.sleep(0.01)
+    finally:
+        node.stop_network()
+    assert http.calls >= 2  # the network thread really was stuck in slow calls
+    assert worst < 0.05, f"sensor loop blocked for {worst:.2f} s"
+    assert "D,TIME DOWN 00:01" in writes
 
 
 def test_help_button_with_no_incident_opens_one_and_asks_for_help(node, calls):
     node.handle_line("B")
     assert node.incident and "A1" in serial(calls)
-    node.tick()
+    step(node)
     assert [e["type"] for e in posted(calls)][:2] == ["fall_suspected", "help_button"]
 
 

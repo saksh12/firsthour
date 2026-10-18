@@ -4,14 +4,13 @@ import json
 import re
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.incident import IncidentMachine
 from app.main import create_app
 from app.models import IncidentState as S
 from app.profile import DEMO_PROFILE
 from app.unlock import UnlockGuard
-from conftest import CAREGIVER, SECRET
+from conftest import CAREGIVER, SECRET, LaptopClient, signed_poll
 from edge.security import CommandVerifier
 from test_api import TS, post_event, settings
 
@@ -68,11 +67,11 @@ def test_resolve_with_no_incident_does_nothing(m, closes):
 
 @pytest.fixture
 def client():
-    return TestClient(create_app(settings()))
+    return LaptopClient(create_app(settings()))
 
 
 def poll(client):
-    return client.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
+    return signed_poll(client).json()["commands"]
 
 
 def escalate(client):

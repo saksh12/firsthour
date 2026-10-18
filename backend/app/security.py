@@ -38,6 +38,29 @@ def sign_event(secret: str, ts: int, raw_body: bytes) -> str:
     return _hmac_hex(secret, f"{ts}.".encode() + raw_body)
 
 
+MAX_POLL_AGE_MS = 10_000  # same window the Pi uses for commands
+
+
+def sign_poll(secret: str, ts: int, device_id: str) -> str:
+    return _hmac_hex(secret, f"{ts}.{device_id}".encode())
+
+
+def verify_poll(secret: str, device_id: str, ts: Optional[int], signature: Optional[str],
+                last_ts: int, now_ms: Optional[int] = None) -> tuple[bool, str]:
+    """Check X-Signature on GET /edge/commands. last_ts is the newest poll already
+    accepted for this device, so a sniffed poll can't be replayed to drain the queue."""
+    if not signature or ts is None:
+        return False, "missing signature"
+    if not hmac.compare_digest(sign_poll(secret, ts, device_id), signature):
+        return False, "bad signature"
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if abs(now - ts) > MAX_POLL_AGE_MS:
+        return False, "stale"
+    if ts <= last_ts:
+        return False, "replay"
+    return True, "ok"
+
+
 def verify_event(secret: str, raw_body: bytes, signature: Optional[str]) -> tuple[bool, str]:
     """Check X-Signature on POST /edge/event.
 

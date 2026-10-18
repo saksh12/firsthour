@@ -6,6 +6,8 @@ import pytest
 
 # app.main builds a module-level app at import, which needs a secret.
 os.environ.setdefault("SHARED_SECRET", "test-secret")
+# No audio on CI/dev machines: speak() becomes a no-op unless a test opts in.
+os.environ.setdefault("VOICE_PLAYBACK", "0")
 
 # Make both `app` (backend) and `edge` importable, so one pytest run covers
 # both sides of the unlock contract.
@@ -39,3 +41,28 @@ class FakeClock:
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+_last_poll_ts = [0]
+
+
+def signed_poll(client, device_id: str = "bath-01"):
+    """GET /edge/commands the way the Pi does it: signed, with a strictly newer ts."""
+    import time
+
+    from edge.security import sign_poll
+
+    ts = _last_poll_ts[0] = max(int(time.time() * 1000), _last_poll_ts[0] + 1)
+    return client.get("/edge/commands", params={"device_id": device_id, "ts": ts},
+                      headers={"X-Signature": sign_poll(SECRET, ts, device_id)})
+
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+
+class LaptopClient(TestClient):
+    """Requests from 127.0.0.1, like the dashboard in a browser on the demo laptop."""
+
+    def __init__(self, app, **kw):
+        kw.setdefault("client", ("127.0.0.1", 50000))
+        super().__init__(app, **kw)

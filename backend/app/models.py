@@ -12,7 +12,7 @@ from pydantic import AliasChoices, BaseModel, Field
 # --- 6.2 Edge to backend -----------------------------------------------------
 
 EdgeEventType = Literal[
-    "fall_suspected", "heartbeat", "help_button", "local_unlock", "cancelled"
+    "fall_suspected", "heartbeat", "help_button", "local_unlock", "unlock_failed", "cancelled"
 ]
 
 
@@ -32,7 +32,8 @@ class EdgeEvent(BaseModel):
 
 # --- 6.3 Backend to edge -----------------------------------------------------
 
-CommandAction = Literal["unlock", "lock", "alarm_on", "alarm_off", "display"]
+# reset: demo reset. The Pi obeys it only with no local incident open (incident_id is "").
+CommandAction = Literal["unlock", "lock", "alarm_on", "alarm_off", "display", "reset"]
 
 
 class Command(BaseModel):

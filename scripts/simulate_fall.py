@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from edge.security import CommandVerifier, sign_event  # noqa: E402
+from edge.security import CommandVerifier, sign_event, sign_poll  # noqa: E402
 
 STRANGER = "+13105559999"  # fictional
 ANSWERS = ["Help, I slipped and can't move my leg", "No", "My right hip", "No I can't", "No"]
@@ -56,6 +56,14 @@ class Api:
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"null")
+
+
+def poll(api: Api, secret: str, device: str):
+    """Signed GET /edge/commands, as the Pi sends it. ts must beat the last accepted poll."""
+    ts = int(time.time() * 1000)
+    time.sleep(0.002)  # two polls never share a millisecond
+    return api.call("GET", f"/edge/commands?device_id={device}&ts={ts}",
+                    headers={"X-Signature": sign_poll(secret, ts, device)})
 
 
 def step(msg: str) -> None:
@@ -107,7 +115,7 @@ def run(api: Api, args, secret: str, caregiver: str) -> None:
         print("   incident already open; resolving it first")
         api.call("POST", "/incident/resolve")
     # Drop commands left from earlier runs (e.g. their alarm_off), as the Pi would after a restart.
-    api.call("GET", f"/edge/commands?device_id={args.device}")
+    poll(api, secret, args.device)
 
     step("Pi posts a signed fall_suspected event")
     ts = int(time.time() * 1000)
@@ -160,7 +168,7 @@ def run(api: Api, args, secret: str, caregiver: str) -> None:
     step("Stranger texts UNLOCK with the right code")
     _, r = api.call("POST", "/comms/inbound", {"sender": STRANGER, "text": f"UNLOCK {code}"})
     check(r == {"type": "unlock_attempt", "allowed": False, "reason": "not enrolled"}, f"refused: {r['reason']}")
-    _, cmds = api.call("GET", f"/edge/commands?device_id={args.device}")
+    _, cmds = poll(api, secret, args.device)
     check(cmds["commands"] == [], "no command reached the Pi")
 
     step("Caregiver replies with a message")
@@ -173,13 +181,15 @@ def run(api: Api, args, secret: str, caregiver: str) -> None:
     check(r["allowed"] is True, "unlock granted by backend")
 
     step("Pi polls and verifies the signed command")
-    _, cmds = api.call("GET", f"/edge/commands?device_id={args.device}")
+    _, cmds = poll(api, secret, args.device)
     check(len(cmds["commands"]) == 1 and cmds["commands"][0]["action"] == "unlock", "one unlock command")
     cmd = cmds["commands"][0]
     ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(ok, f"Pi accepts: {reason}  (real Pi would now send U to the Arduino)")
     ok, reason = pi.check(cmd, local_incident_id=incident_id)
     check(not ok and reason == "replay", "replaying the same command is refused")
+    _, r = api.call("POST", "/comms/inbound", {"sender": caregiver, "text": f"UNLOCK {code}"})
+    check(r["reason"] == "code already used", "the code works once")
 
     step("Operator resolves")
     _, r = api.call("POST", "/incident/resolve")

@@ -218,6 +218,7 @@ button:disabled { opacity: .5; cursor: default; }
 
   let view = blank();
   let localUnlockUntil = 0;
+  let unlockFailed = false; // the Pi sent U but the latch never answered ACK,U
 
   function blank() {
     return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], triage: null, asking: null };
@@ -266,14 +267,16 @@ button:disabled { opacity: .5; cursor: default; }
   }
 
   function renderDoor() {
-    // "Unlocked" only once the Pi reports it moved the servo (device_status local_unlock).
+    // "Unlocked" only once the Pi reports the latch confirmed (device_status local_unlock).
     const open = Date.now() < localUnlockUntil;
-    const sent = !open && view.state === "UNLOCKED";
+    const failed = !open && unlockFailed && view.state === "UNLOCKED";
+    const sent = !open && !failed && view.state === "UNLOCKED";
     const t = tone(open ? "open" : sent ? "resp" : "idle");
     $("door-panel").style.color = t.color;
-    $("door-state").textContent = open ? "Unlocked" : sent ? "Unlocking…" : "Locked";
+    $("door-state").textContent = open ? "Unlocked" : failed ? "Unlock failed" : sent ? "Unlocking…" : "Locked";
     $("door-note").textContent = open
       ? "Unlocked by the caregiver. Relocks automatically."
+      : failed ? "The latch did not confirm. The door is still locked."
       : sent ? "Unlock granted. Waiting for the door to confirm."
       : "Opens only for an enrolled caregiver with the one-time code.";
     $("shackle").setAttribute("d", open ? "M34 44 V30 a14 14 0 0 1 28 0 V22" : "M34 44 V30 a14 14 0 0 1 28 0 V44");
@@ -393,11 +396,13 @@ button:disabled { opacity: .5; cursor: default; }
         log("Caregiver " + d.sender + ": “" + d.text + "” (read aloud)");
         break;
       case "unlock_attempt":
+        if (d.allowed) unlockFailed = false;
         addAttempt(d);
         log((d.allowed ? "Unlock granted for " : "Unlock refused for ") + d.sender + (d.allowed ? "" : " · " + d.reason));
         break;
       case "device_status":
-        if (d.event === "local_unlock") localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS;
+        if (d.event === "local_unlock") { localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false; }
+        if (d.event === "unlock_failed") unlockFailed = true;
         log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
         break;
     }

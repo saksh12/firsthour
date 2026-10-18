@@ -6,12 +6,11 @@ import time
 import urllib.error
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.profile import DEMO_PROFILE
 from app.triage import QUESTIONS, StepFun, parse_rules
-from conftest import CAREGIVER
+from conftest import CAREGIVER, LaptopClient
 from test_api import post_event, settings
 
 ANSWERS = [("ok", "Help, I slipped"), ("head", "no"), ("pain", "my right hip")]
@@ -112,7 +111,7 @@ def test_unexpected_response_shape_falls_back():
 
 def test_hard_deadline_even_if_the_server_hangs():
     t0 = time.monotonic()
-    rec = sf(FakeTransport(GOOD, delay=2.0), timeout_s=0.2).triage(ANSWERS, DEMO_PROFILE)
+    rec = sf(FakeTransport(GOOD, delay=2.0), triage_timeout_s=0.2).triage(ANSWERS, DEMO_PROFILE)
     assert time.monotonic() - t0 < 1.0
     assert rec == parse_rules(ANSWERS, DEMO_PROFILE)
 
@@ -155,6 +154,15 @@ def test_transcript_never_logged(caplog):
 
 # --- rewrite -------------------------------------------------------------------
 
+def test_rewrite_and_triage_have_separate_deadlines():
+    t = FakeTransport(GOOD)
+    s = sf(t, timeout_s=3.0, triage_timeout_s=15.0)
+    s.triage(ANSWERS, DEMO_PROFILE)
+    s.rewrite("omw")
+    assert [c[3] for c in t.calls] == [15.0, 3.0]
+    assert "Answer immediately" in t.calls[1][2]["messages"][0]["content"]
+
+
 def test_rewrite_good():
     s = sf(FakeTransport("Your daughter is two minutes away."))
     assert s.rewrite("im like 2 min away hang on!!") == "Your daughter is two minutes away."
@@ -194,10 +202,16 @@ def test_app_uses_stepfun_for_triage_and_reply():
         content = json.dumps(GOOD) if "JSON record" in system else "Help is on the way."
         return {"choices": [{"message": {"content": content}}]}
 
-    c = TestClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
+    c = LaptopClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
                                        STEPFUN_TRANSPORT=transport)))
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help"}).json()
+    assert snap["state"] == "ALERTING"  # the rule-based record escalates; StepFun refines it after
+    for _ in range(100):
+        snap = c.get("/incident").json()
+        if snap["triage"]["summary"] == GOOD["summary"]:
+            break
+        time.sleep(0.01)
     assert snap["triage"]["summary"] == GOOD["summary"]
     assert snap["triage"]["on_blood_thinner"] is True
     c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "omw"})
@@ -207,7 +221,7 @@ def test_app_uses_stepfun_for_triage_and_reply():
 
 
 def test_app_default_is_rules_only():
-    c = TestClient(create_app(settings()))
+    c = LaptopClient(create_app(settings()))
     post_event(c)
     snap = c.post("/person/answer", json={"text": "help, I can't move"}).json()
     assert snap["triage"]["can_move"] is False
