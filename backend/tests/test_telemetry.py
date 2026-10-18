@@ -11,7 +11,7 @@ from sentry_sdk.transport import Transport
 
 from app.main import create_app
 from app.telemetry import Telemetry
-from conftest import CAREGIVER, STRANGER
+from conftest import CAREGIVER, STRANGER, signed_poll
 from test_api import TS, post_event, settings
 
 FAKE_DSN = "https://public@o0.ingest.example.invalid/1"
@@ -86,7 +86,7 @@ def test_full_incident_is_one_trace_with_every_stage(cap, monkeypatch):
     code = code_of(c)
     c.post("/comms/inbound", json={"sender": STRANGER, "text": f"UNLOCK {code}"})
     c.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"})
-    c.get("/edge/commands", params={"device_id": "bath-01"})
+    signed_poll(c)
     c.post("/incident/resolve")
     flush()
 
@@ -140,7 +140,7 @@ def test_polling_and_health_are_not_traced(cap):
     c = app_with(cap)
     for _ in range(3):
         c.get("/health")
-        c.get("/edge/commands", params={"device_id": "bath-01"})
+        signed_poll(c)
     post_event(c, "heartbeat")
     flush()
     names = [t["transaction"] for t in cap.items("transaction")]

@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import make_command, verify_event
+from .security import make_command, verify_event, verify_poll
 from .telemetry import Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
@@ -90,6 +90,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     queues: dict[str, list] = defaultdict(list)
     last_heartbeat: dict[str, float] = {}
+    last_poll_ts: dict[str, int] = {}
     events: deque = deque(maxlen=500)
     outbox: list[dict] = []
     spoken: deque = deque(maxlen=100)
@@ -273,7 +274,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 
     @app.get("/edge/commands", response_model=CommandsResponse)
-    def edge_commands(device_id: str):
+    def edge_commands(device_id: str, request: Request, ts: Optional[int] = None):
+        # Signed poll: otherwise anyone on the Wi-Fi could poll first and swallow the unlock.
+        ok, reason = verify_poll(secret, device_id, ts, request.headers.get("X-Signature"),
+                                 last_poll_ts.get(device_id, 0))
+        if not ok:
+            log.warning("edge poll rejected device_id=%s reason=%s", device_id, reason)
+            raise HTTPException(status_code=401, detail=reason)
+        last_poll_ts[device_id] = ts
         # Commands are signed and single-use, so handing them out once is enough.
         pending, queues[device_id] = queues[device_id], []
         for c in pending:

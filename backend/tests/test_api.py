@@ -2,12 +2,13 @@
 
 import json
 import re
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from conftest import CAREGIVER, SECRET, STRANGER
+from conftest import CAREGIVER, SECRET, STRANGER, signed_poll
 from edge.security import CommandVerifier, sign_event
 
 TS = 1_760_000_000_000
@@ -78,20 +79,20 @@ def test_full_unlock_path_and_stranger_refused(client):
 
     stranger = client.post("/comms/inbound", json={"sender": STRANGER, "text": f"UNLOCK {code}"}).json()
     assert stranger == {"type": "unlock_attempt", "allowed": False, "reason": "not enrolled"}
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
     ok = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()
     assert ok["allowed"] is True
     assert client.get("/incident").json()["state"] == "UNLOCKED"
 
-    cmds = client.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
+    cmds = signed_poll(client).json()["commands"]
     assert [c["action"] for c in cmds] == ["unlock"]
     # The Pi independently accepts it, and only once.
     pi = CommandVerifier(SECRET)
     assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (True, "ok")
     assert pi.check(cmds[0], local_incident_id=cmds[0]["incident_id"]) == (False, "replay")
     # Commands are handed out once.
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
 
 def test_im_fine_cancels_and_no_alert_is_sent(client):
@@ -136,7 +137,7 @@ def test_caregiver_message_is_read_aloud(client):
     assert r == {"type": "message", "accepted": True}
     assert client.app.state.spoken[-1] == "I'm 2 minutes away"
     assert client.get("/incident").json()["state"] == "RESPONDING"
-    assert client.get("/edge/commands", params={"device_id": "bath-01"}).json() == {"commands": []}
+    assert signed_poll(client).json() == {"commands": []}
 
 
 def test_incident_snapshot_and_events_never_contain_the_code(client, monkeypatch):
@@ -193,3 +194,20 @@ def test_help_button_escalates(client):
 def test_missing_secret_refuses_to_start():
     with pytest.raises(RuntimeError):
         create_app(settings(SHARED_SECRET=""))
+
+
+def test_unsigned_or_replayed_poll_is_refused_and_leaves_the_unlock_queued(client):
+    code = escalate(client)
+    assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["allowed"]
+    # Someone else on the Wi-Fi polls first: no signature, then a forged one.
+    r = client.get("/edge/commands", params={"device_id": "bath-01"})
+    assert r.status_code == 401
+    ts = int(time.time() * 1000)
+    r = client.get("/edge/commands", params={"device_id": "bath-01", "ts": ts}, headers={"X-Signature": "00" * 32})
+    assert r.status_code == 401
+    # The Pi's signed poll still gets the unlock.
+    r = signed_poll(client)
+    assert [c["action"] for c in r.json()["commands"]] == ["unlock"]
+    # Replaying that exact poll is refused.
+    replay = client.get(str(r.request.url), headers={"X-Signature": r.request.headers["X-Signature"]})
+    assert replay.status_code == 401 and replay.json()["detail"] == "replay"

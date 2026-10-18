@@ -41,3 +41,17 @@ class FakeClock:
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+_last_poll_ts = [0]
+
+
+def signed_poll(client, device_id: str = "bath-01"):
+    """GET /edge/commands the way the Pi does it: signed, with a strictly newer ts."""
+    import time
+
+    from edge.security import sign_poll
+
+    ts = _last_poll_ts[0] = max(int(time.time() * 1000), _last_poll_ts[0] + 1)
+    return client.get("/edge/commands", params={"device_id": device_id, "ts": ts},
+                      headers={"X-Signature": sign_poll(SECRET, ts, device_id)})

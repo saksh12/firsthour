@@ -11,7 +11,7 @@ from app.main import create_app
 from app.models import IncidentState as S
 from app.profile import DEMO_PROFILE
 from app.unlock import UnlockGuard
-from conftest import CAREGIVER, SECRET
+from conftest import CAREGIVER, SECRET, signed_poll
 from edge.security import CommandVerifier
 from test_api import TS, post_event, settings
 
@@ -72,7 +72,7 @@ def client():
 
 
 def poll(client):
-    return client.get("/edge/commands", params={"device_id": "bath-01"}).json()["commands"]
+    return signed_poll(client).json()["commands"]
 
 
 def escalate(client):

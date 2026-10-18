@@ -65,6 +65,7 @@ class UnlockGuard:
             "code": f"{secrets.randbelow(10000):04d}",
             "expires": self._clock() + self.window_s,
             "tries": 0,
+            "used": False,
         }
         log.info("incident opened incident_id=%s", incident_id)
         return self._incident["code"]
@@ -84,6 +85,10 @@ class UnlockGuard:
             return self._decide(False, "not enrolled", sender, inc["id"])
         if inc["tries"] >= MAX_TRIES:
             return self._decide(False, "locked out", sender, inc["id"])
+        # One-time code (rule 3): after the grant there is no valid code left to guess,
+        # so later attempts are refused without counting as wrong tries.
+        if inc["used"]:
+            return self._decide(False, "code already used", sender, inc["id"])
 
         m = _UNLOCK.match(text.strip().upper())
         code = m.group(1) if m and not m.group(2) else None
@@ -91,6 +96,7 @@ class UnlockGuard:
             inc["tries"] += 1
             return self._decide(False, "bad code", sender, inc["id"])
 
+        inc["used"] = True
         result = self._decide(True, "granted", sender, inc["id"])
         if self._on_grant:
             self._on_grant(inc["id"])
