@@ -42,12 +42,14 @@ ACCEL_THRESHOLD_G = _f("ACCEL_THRESHOLD_G", "1.0")
 FUSION_WINDOW_MS = int(os.getenv("FUSION_WINDOW_MS", "400"))
 COOLDOWN_S = _f("FALL_COOLDOWN_SECONDS", "30")
 
-# Local incident stays open this long unless the backend sends a signed alarm_off.
+# Unlock rule 1: the Pi refuses unlocks after this. The local alarm stays up regardless,
+# until a signed alarm_off or reset.
 INCIDENT_WINDOW_SECONDS = _f("INCIDENT_WINDOW_SECONDS", "600")
 
 POLL_S = _f("POLL_SECONDS", "1")
 HEARTBEAT_S = _f("HEARTBEAT_SECONDS", "5")  # backend /health goes 503 after 30 s of silence
 OFFLINE_BACKOFF_S = _f("OFFLINE_BACKOFF_SECONDS", "5")
 HTTP_TIMEOUT_S = _f("HTTP_TIMEOUT_SECONDS", "1")
+UNLOCK_ACK_TIMEOUT_S = _f("UNLOCK_ACK_TIMEOUT_SECONDS", "2")  # U sent, no ACK,U -> unlock_failed
 
 LOG_DIR = Path(os.getenv("EDGE_LOG_DIR", str(REPO / "edge" / "logs")))

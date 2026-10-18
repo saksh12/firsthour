@@ -5,8 +5,9 @@ Reads the Arduino's serial lines, runs two-sensor fusion, owns the local inciden
 (buzzer + TIME DOWN clock), posts signed events to the backend,
 and polls and verifies signed commands.
 
-Rule: safety never waits on the network. handle_line() only touches the Arduino and
-local state; all HTTP happens in tick(), with a short timeout and an offline backoff.
+Rule: safety never waits on the network. handle_line() and tick() only touch the Arduino
+and local state; all HTTP runs on its own thread (network_step), with a short timeout and
+an offline backoff, and hands commands back through a queue.
 
 Run on the laptop with fake sensors:
     python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin
@@ -18,8 +19,10 @@ import argparse
 import json
 import logging
 import math
+import queue
 import select
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from edge import config  # noqa: E402
-from edge.security import CommandVerifier, sign_event  # noqa: E402
+from edge.security import CommandVerifier, sign_event, sign_poll  # noqa: E402
 
 log = logging.getLogger("firsthour.edge")
 
@@ -119,19 +122,27 @@ class Outbox:
     def __init__(self, path):
         self.path = Path(path)
         self.items = []
+        # The sensor loop adds and the network thread pops.
+        self._lock = threading.Lock()
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
                     self.items.append(json.loads(line))
 
     def add(self, item):
-        self.items.append(item)
-        self._save()
+        with self._lock:
+            self.items.append(item)
+            self._save()
+
+    def peek(self):
+        with self._lock:
+            return self.items[0] if self.items else None
 
     def pop(self):
-        item = self.items.pop(0)
-        self._save()
-        return item
+        with self._lock:
+            item = self.items.pop(0)
+            self._save()
+            return item
 
     def __len__(self):
         return len(self.items)
@@ -166,8 +177,8 @@ class UrlHttp:
         return self._do(urllib.request.Request(self.base + path, data=raw, method="POST",
                                                headers={"Content-Type": "application/json", **headers}))
 
-    def get(self, path):
-        return self._do(urllib.request.Request(self.base + path))
+    def get(self, path, headers=None):
+        return self._do(urllib.request.Request(self.base + path, headers=headers or {}))
 
 
 # --- the node ------------------------------------------------------------------
@@ -183,7 +194,8 @@ class Node:
                  clock=time.time, sound_t=config.SOUND_THRESHOLD, accel_t=config.ACCEL_THRESHOLD_G,
                  window_ms=config.FUSION_WINDOW_MS, cooldown_s=config.COOLDOWN_S,
                  incident_window_s=config.INCIDENT_WINDOW_SECONDS, poll_s=config.POLL_S,
-                 heartbeat_s=config.HEARTBEAT_S, backoff_s=config.OFFLINE_BACKOFF_S):
+                 heartbeat_s=config.HEARTBEAT_S, backoff_s=config.OFFLINE_BACKOFF_S,
+                 ack_timeout_s=config.UNLOCK_ACK_TIMEOUT_S):
         if not secret:
             raise ValueError("SHARED_SECRET is not set")
         self.device_id, self.secret = device_id, secret
@@ -196,10 +208,15 @@ class Node:
         self.outbox = Outbox(outbox_path)
         self.incident_window_s = incident_window_s
         self.poll_s, self.heartbeat_s, self.backoff_s = poll_s, heartbeat_s, backoff_s
+        self.ack_timeout_s = ack_timeout_s
         self.incident = None  # {"id", "opened_at"}
+        self._pending_unlock = None  # {"incident_id", "at"}: U sent, waiting for ACK,U
         self.online = None
         self._net_ok_at = 0.0
         self._last_poll = self._last_hb = -1e18
+        self._last_poll_ts = 0
+        self._commands = queue.Queue()  # network thread -> sensor loop
+        self._stop = threading.Event()
         self._display = None
         self._show("READY")
 
@@ -226,16 +243,27 @@ class Node:
             self._queue("help_button")
         elif kind == "ACK":
             log.debug("arduino ack %s", msg["cmd"])
+            if msg["cmd"] == "U":
+                self._on_unlock_ack()
 
     def tick(self):
+        """Sensor-loop housekeeping. Never touches the network."""
+        while True:
+            try:
+                self._apply(self._commands.get_nowait())
+            except queue.Empty:
+                break
         now = self._clock()
-        inc = self.incident
-        if inc and now - inc["opened_at"] > self.incident_window_s:
-            self._close_incident("window expired")
+        p = self._pending_unlock
+        if p and now - p["at"] > self.ack_timeout_s:
+            # The Mac only shows what the Pi confirms, so a silent latch is reported, not hidden.
+            log.error("no ACK,U from the arduino after %.1f s incident_id=%s", self.ack_timeout_s, p["incident_id"])
+            self._pending_unlock = None
+            self._queue("unlock_failed")
+        # No local timeout: the alarm stays up until alarm_off (I'm fine, resolve) or a reset.
+        # The unlock window (rule 1) is enforced in _apply instead.
         if self.incident:
             self._show("TIME DOWN " + format_down(now - self.incident["opened_at"]))
-        if self.http is not None and now >= self._net_ok_at:
-            self._network(now)
 
     # incident -------------------------------------------------------------
 
@@ -275,10 +303,28 @@ class Node:
         self.outbox.add({"raw": raw, "sig": sign_event(self.secret, ts, raw.encode())})
         log.info("event queued type=%s local_incident_id=%s outbox=%d", type_, body["local_incident_id"], len(self.outbox))
 
-    def _network(self, now):
+    def start_network(self, interval_s=0.05):
+        """Run network_step on a daemon thread, so a slow backend can't stall the sensor loop."""
+        def run():
+            while not self._stop.wait(interval_s):
+                try:
+                    self.network_step(self._clock())
+                except Exception:  # never let the network thread die mid-incident
+                    log.exception("network step failed")
+        threading.Thread(target=run, daemon=True, name="edge-net").start()
+
+    def stop_network(self):
+        self._stop.set()
+
+    def network_step(self, now):
+        """Deliver the outbox, heartbeat, poll. Commands go to the sensor loop via the queue."""
+        if self.http is None or now < self._net_ok_at:
+            return
         try:
-            while len(self.outbox):
-                item = self.outbox.items[0]
+            while True:
+                item = self.outbox.peek()
+                if item is None:
+                    break
                 status, _ = self.http.post("/edge/event", item["raw"].encode(), {"X-Signature": item["sig"]})
                 if status >= 500:
                     raise OSError(f"backend {status}")
@@ -296,12 +342,19 @@ class Node:
                     raise OSError(f"backend {status}")
                 self._last_hb = now
             if now - self._last_poll >= self.poll_s:
-                status, body = self.http.get(f"/edge/commands?device_id={self.device_id}")
+                # Signed, so nobody else on the Wi-Fi can poll first and swallow the unlock.
+                # The backend refuses a ts it has already seen.
+                ts = self._last_poll_ts = max(int(now * 1000), self._last_poll_ts + 1)
+                status, body = self.http.get(f"/edge/commands?device_id={self.device_id}&ts={ts}",
+                                             {"X-Signature": sign_poll(self.secret, ts, self.device_id)})
                 if status >= 500:
                     raise OSError(f"backend {status}")
                 self._last_poll = now
-                for cmd in (body or {}).get("commands", []):
-                    self._apply(cmd)
+                if status != 200:
+                    log.error("command poll rejected status=%s (wrong SHARED_SECRET, or the Pi clock is >10 s off)",
+                              status)
+                for cmd in (body or {}).get("commands", []) if status == 200 else []:
+                    self._commands.put(cmd)
             self._set_online(True)
         except OSError as e:
             self._set_online(False, e)
@@ -321,8 +374,15 @@ class Node:
             return
         action = cmd["action"]
         if action == "unlock":
+            # Rule 1: unlocks die with the window. The local alarm itself does not.
+            if self._clock() - self.incident["opened_at"] > self.incident_window_s:
+                log.warning("unlock refused reason=outside window incident_id=%s", self.incident["id"])
+                return
             self._write("U")
-            self._queue("local_unlock")
+            # local_unlock waits for the Arduino's ACK,U: the Mac only shows what the latch confirms.
+            self._pending_unlock = {"incident_id": self.incident["id"], "at": self._clock()}
+        elif action == "reset":
+            self._reset()
         elif action == "lock":
             self._write("L")
         elif action == "alarm_on":
@@ -333,14 +393,45 @@ class Node:
             log.info("display command has no text field in the contract yet; ignored")
 
 
+    def _on_unlock_ack(self):
+        p, self._pending_unlock = self._pending_unlock, None
+        if not p:
+            log.warning("ACK,U with no unlock pending (late, after unlock_failed); not reported")
+            return
+        log.info("latch confirmed incident_id=%s", p["incident_id"])
+        self._queue("local_unlock")
+
+    def _reset(self):
+        """Demo reset between runs. Never ends a live incident: alarm_off does that."""
+        if self.incident:
+            log.warning("reset refused, local incident open incident_id=%s", self.incident["id"])
+            return
+        self._write("L")
+        self._write("A0")
+        self._pending_unlock = None
+        # The 30 s cooldown would swallow the next demo fall.
+        self.fusion._reset()
+        self.fusion.cooldown_until = None
+        self._display = None
+        self._show("READY")
+        log.info("demo reset: latch locked, alarm off, fusion cleared")
+
+
 # --- I/O sources -----------------------------------------------------------------
 
 
 class StdinSource:
-    def __init__(self):
+    """Sensor lines from stdin. It also stands in for the Arduino's latch: it answers U with
+    ACK,U unless auto_ack is off (--no-ack, a dead latch)."""
+
+    def __init__(self, auto_ack=True):
         self.eof = False
+        self.auto_ack = auto_ack
+        self._replies = []
 
     def readline(self, timeout):
+        if self._replies:
+            return self._replies.pop(0)
         if self.eof:
             time.sleep(timeout)
             return None
@@ -354,9 +445,10 @@ class StdinSource:
             return None
         return line
 
-    @staticmethod
-    def write(cmd):
+    def write(self, cmd):
         print(f"-> ARDUINO {cmd}", file=sys.stderr, flush=True)
+        if cmd == "U" and self.auto_ack:
+            self._replies.append("ACK,U")
 
 
 class SerialSource:
@@ -384,6 +476,7 @@ def main():
                      help="Arduino serial port (default: SERIAL_PORT from .env)")
     ap.add_argument("--backend", default=config.BACKEND_URL)
     ap.add_argument("--offline", action="store_true", help="never contact the backend")
+    ap.add_argument("--no-ack", action="store_true", help="with --stdin: the fake latch never answers ACK,U")
     ap.add_argument("--exit-on-eof", action="store_true", help="stop once stdin closes and the outbox is empty")
     args = ap.parse_args()
 
@@ -396,7 +489,7 @@ def main():
 
     if not args.stdin and not args.serial:
         sys.exit("no serial port: pass --serial PORT or set SERIAL_PORT in .env")
-    source = StdinSource() if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
+    source = StdinSource(auto_ack=not args.no_ack) if args.stdin else SerialSource(args.serial, config.SERIAL_BAUD)
     node = Node(
         device_id=config.DEVICE_ID, secret=config.SHARED_SECRET,
         write_serial=source.write,
@@ -404,6 +497,7 @@ def main():
         outbox_path=config.LOG_DIR / "outbox.jsonl",
     )
     log.info("edge node up device_id=%s backend=%s", config.DEVICE_ID, "offline" if args.offline else args.backend)
+    node.start_network()
     try:
         while True:
             line = source.readline(0.05)
