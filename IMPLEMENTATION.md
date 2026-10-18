@@ -344,6 +344,29 @@ On only with `PI_STT=1` on the backend and `WHISPER_MODEL` set on the Pi. The mi
 
 All three `/person/*` routes are laptop-only and answer 404 while `PI_STT=0`. The words are never logged on either side; logs keep clip id, latency, length and word count.
 
+### 6.9 Pi processes (issue #22 step 1)
+
+`edge/supervisor.py` runs the Pi as separate processes at fixed QNX priorities (`on -p`), so `pidin` shows the split. The single-process reader (`sensor_node.py --usb`) still works unchanged.
+
+| Process | Priority | Job |
+| --- | --- | --- |
+| safety (`sensor_node.py --uplink-socket`) | 21 (`SAFETY_PRIORITY`) | Sensors via its USB helper, fusion, local incident, alarm, clock, display. Holds `SHARED_SECRET`: signs every event, heartbeat, poll and clip fetch, and verifies every command. Only writer to the hub, so only it can send `U` |
+| uplink (`uplink.py`) | 10 (`UPLINK_PRIORITY`) | HTTP to the backend: outbox delivery, heartbeats, command polls, clip fetch and the whisper call. Signs and verifies nothing. Allowed to hang or die |
+| whisper-server | 8 (`WHISPER_PRIORITY`) | Speech-to-text on `127.0.0.1` only, when `WHISPER_MODEL` is set |
+
+The two Python processes talk over one Unix stream socket (`edge/logs/uplink.sock`, mode 600) carrying newline-delimited JSON (`edge/link.py`):
+
+- safety → uplink: `event {raw, sig}` (every outbox item, resent to each new uplink), `poll {ts, sig}`, `heartbeat {raw, sig}`, `transcribe {clip_id, incident_id, ts, sig}`.
+- uplink → safety: `ack {sig}` (delivered, so the safety process drops it from the outbox), `poll` and `heartbeat` (requests for a signature), `commands {commands}` (passed through unverified), `speech {clip_id, result}` (accepted only for a clip the safety process dispatched).
+
+Rules:
+
+1. The safety process never blocks on the link. It reads and writes only what is ready, and drops an uplink whose unread data passes 1 MB.
+2. Uplink gone: the alarm, clock, display and latch checks carry on, events wait in the outbox, a pending clip answers `speech_text` with an error (so silence still escalates), and `transcribe` answers "uplink down" at once.
+3. The supervisor restarts a dead child after 1 s, doubling the wait (up to 30 s) for a child that dies within 5 s of starting. QNX's HAM is not on the image.
+4. A restarted safety process (`--resume`) picks up its open incident from `edge/logs/incident.json` (same id, same clock, alarm on, latch locked when the hub reconnects) and refuses any command signed before it started, because its nonce cache is empty. A fresh supervisor start begins clean.
+5. SIGTERM to the supervisor stops every child.
+
 ---
 
 ## 7. The phases (step by step)

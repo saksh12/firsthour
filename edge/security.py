@@ -44,9 +44,10 @@ INCIDENT_ACTIONS = ("unlock", "alarm_off", "transcribe")
 class CommandVerifier:
     """Checks signature, freshness, nonce and, for incident actions, the local incident."""
 
-    def __init__(self, secret, max_age_ms=MAX_AGE_MS, clock=time.time):
+    def __init__(self, secret, max_age_ms=MAX_AGE_MS, clock=time.time, not_before_ms=0):
         self._secret = secret
         self._max_age_ms = max_age_ms
+        self._not_before_ms = not_before_ms
         self._clock = clock
         self._seen = {}  # nonce -> ts; pruned so it can't grow forever on a long soak test
 
@@ -66,6 +67,8 @@ class CommandVerifier:
         now_ms = int(self._clock() * 1000)
         if abs(now_ms - cmd["ts"]) > self._max_age_ms:
             return False, "stale"
+        if cmd["ts"] < self._not_before_ms:
+            return False, "signed before restart"
         self._prune(now_ms)
         if cmd["nonce"] in self._seen:
             return False, "replay"

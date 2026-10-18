@@ -13,6 +13,9 @@ Run on the laptop with fake sensors:
     python3 edge/sim_sensors.py | python3 edge/sensor_node.py --stdin
 On the Pi:
     sudo ~/fh-venv/bin/python edge/sensor_node.py --usb   # QNX 8: no USB-serial driver, raw libusb
+
+With --uplink-socket this is only the safety process: HTTP and speech-to-text move to
+edge/uplink.py at a lower priority, started together by edge/supervisor.py (IMPLEMENTATION.md 6.9).
 """
 
 import argparse
@@ -150,6 +153,16 @@ class Outbox:
             self._save()
             return item
 
+    def remove(self, sig) -> bool:
+        """Drop the event with this signature (delivered by the uplink process)."""
+        with self._lock:
+            for i, item in enumerate(self.items):
+                if item["sig"] == sig:
+                    del self.items[i]
+                    self._save()
+                    return True
+            return False
+
     def __len__(self):
         return len(self.items)
 
@@ -215,8 +228,10 @@ class Transcriber:
 
     def __init__(self, model, binary=config.WHISPER_BIN, server_binary=config.WHISPER_SERVER_BIN,
                  threads=config.WHISPER_THREADS, priority=config.WHISPER_PRIORITY,
-                 timeout_s=config.WHISPER_TIMEOUT_S, port=config.WHISPER_PORT):
+                 timeout_s=config.WHISPER_TIMEOUT_S, port=config.WHISPER_PORT, external_server=False):
+        """external_server: the supervisor runs whisper-server; this object only calls it."""
         self.timeout_s = timeout_s
+        self.external_server = external_server
         if sys.platform.startswith("qnx") and shutil.which("on"):
             prefix = ["on", "-p", str(priority)]
         elif shutil.which("nice"):
@@ -234,7 +249,7 @@ class Transcriber:
 
     def start(self) -> None:
         """Start (or restart) the resident server. Never blocks on the model loading."""
-        if self.server_cmd is None or time.monotonic() < self._restart_at:
+        if self.external_server or self.server_cmd is None or time.monotonic() < self._restart_at:
             return
         if self._server is not None and self._server.poll() is None:
             return
@@ -262,7 +277,7 @@ class Transcriber:
     def __call__(self, wav: bytes) -> str:
         ctx = str(self.audio_ctx(len(wav)))
         self.start()
-        if self._server is not None and self._server.poll() is None:
+        if (self.external_server and self.server_cmd) or (self._server is not None and self._server.poll() is None):
             try:
                 return clean_transcript(self._via_server(wav, ctx))
             except ConnectionRefusedError:
@@ -315,7 +330,7 @@ class Node:
                  incident_window_s=config.INCIDENT_WINDOW_SECONDS, poll_s=config.POLL_S,
                  heartbeat_s=config.HEARTBEAT_S, backoff_s=config.OFFLINE_BACKOFF_S,
                  ack_timeout_s=config.UNLOCK_ACK_TIMEOUT_S, stt=None,
-                 audio_timeout_s=config.AUDIO_FETCH_TIMEOUT_S):
+                 audio_timeout_s=config.AUDIO_FETCH_TIMEOUT_S, state_path=None, resume=False):
         if not secret:
             raise ValueError("SHARED_SECRET is not set")
         self.device_id, self.secret = device_id, secret
@@ -324,7 +339,9 @@ class Node:
         self._clock = clock
         self.fusion = Fusion(sound_t, accel_t, window_ms, int(cooldown_s * 1000))
         self.accel = AccelDelta()
-        self.verifier = CommandVerifier(secret, clock=clock)
+        # After a restart the nonce cache is empty, so refuse anything signed before this start.
+        self.verifier = CommandVerifier(secret, clock=clock,
+                                        not_before_ms=int(clock() * 1000) if resume else 0)
         self.outbox = Outbox(outbox_path)
         self.incident_window_s = incident_window_s
         self.poll_s, self.heartbeat_s, self.backoff_s = poll_s, heartbeat_s, backoff_s
@@ -341,8 +358,12 @@ class Node:
         # sensor loop -> STT thread. Small: a backlog of stale answers is worse than dropping one.
         self._stt_jobs = queue.Queue(maxsize=2)
         self._stop = threading.Event()
+        self.uplink = None  # UplinkServer when HTTP runs in a separate uplink process
+        self._state_path = Path(state_path) if state_path else None
         self._display = None
         self._show("READY")
+        if self._state_path:
+            self._load_state(resume)
 
     # inputs ---------------------------------------------------------------
 
@@ -403,6 +424,7 @@ class Node:
         # Local alarm first. Nothing below this line can delay it.
         self._write("A1")
         self._show("TIME DOWN 00:00")
+        self._save_state()
         log.info("local incident opened incident_id=%s", self.incident["id"])
         self._queue("fall_suspected", sensors)
 
@@ -413,6 +435,31 @@ class Node:
         self.incident = None
         self._write("A0")
         self._show("READY")
+        self._save_state()
+
+    def _save_state(self):
+        if not self._state_path:
+            return
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"incident": self.incident}))
+        tmp.replace(self._state_path)
+
+    def _load_state(self, resume):
+        """A restarted safety process picks its open incident back up: same id, same clock,
+        alarm on. A fresh start (resume=False) begins clean."""
+        if not resume:
+            self._state_path.unlink(missing_ok=True)
+            return
+        try:
+            incident = json.loads(self._state_path.read_text()).get("incident")
+        except (OSError, ValueError):
+            return
+        if isinstance(incident, dict) and isinstance(incident.get("id"), str) \
+                and isinstance(incident.get("opened_at"), (int, float)):
+            self.incident = {"id": incident["id"], "opened_at": float(incident["opened_at"])}
+            self._write("A1")
+            self._show("TIME DOWN " + format_down(self._clock() - self.incident["opened_at"]))
+            log.warning("resumed local incident after restart incident_id=%s", self.incident["id"])
 
     def _show(self, text):
         if text != self._display:
@@ -472,20 +519,15 @@ class Node:
                     log.error("event rejected status=%s event=%s", status, item["raw"][:120])
                 self.outbox.pop()
             if now - self._last_hb >= self.heartbeat_s:
-                ts = int(now * 1000)
-                raw = json.dumps({"device_id": self.device_id, "ts": ts, "type": "heartbeat",
-                                  "local_incident_id": self.incident["id"] if self.incident else None},
-                                 separators=(",", ":")).encode()
-                status, _ = self.http.post("/edge/event", raw, {"X-Signature": sign_event(self.secret, ts, raw)})
+                raw, sig = self.signed_heartbeat(now)
+                status, _ = self.http.post("/edge/event", raw, {"X-Signature": sig})
                 if status >= 500:
                     raise OSError(f"backend {status}")
                 self._last_hb = now
             if now - self._last_poll >= self.poll_s:
-                # Signed, so nobody else on the Wi-Fi can poll first and swallow the unlock.
-                # The backend refuses a ts it has already seen.
-                ts = self._last_poll_ts = max(int(now * 1000), self._last_poll_ts + 1)
+                ts, sig = self.signed_poll(now)
                 status, body = self.http.get(f"/edge/commands?device_id={self.device_id}&ts={ts}",
-                                             {"X-Signature": sign_poll(self.secret, ts, self.device_id)})
+                                             {"X-Signature": sig})
                 if status >= 500:
                     raise OSError(f"backend {status}")
                 self._last_poll = now
@@ -498,6 +540,19 @@ class Node:
         except OSError as e:
             self._set_online(False, e)
             self._net_ok_at = now + self.backoff_s
+
+    def signed_heartbeat(self, now):
+        ts = int(now * 1000)
+        raw = json.dumps({"device_id": self.device_id, "ts": ts, "type": "heartbeat",
+                          "local_incident_id": self.incident["id"] if self.incident else None},
+                         separators=(",", ":")).encode()
+        return raw, sign_event(self.secret, ts, raw)
+
+    def signed_poll(self, now):
+        # Signed, so nobody else on the Wi-Fi can poll first and swallow the unlock.
+        # The backend refuses a ts it has already seen.
+        ts = self._last_poll_ts = max(int(now * 1000), self._last_poll_ts + 1)
+        return ts, sign_poll(self.secret, ts, self.device_id)
 
     def _set_online(self, online, err=None):
         if online != self.online:
@@ -536,7 +591,13 @@ class Node:
     # speech-to-text ---------------------------------------------------------
 
     def _start_transcribe(self, clip_id, incident_id):
-        """Sensor loop: hand the clip to the STT thread and return at once."""
+        """Sensor loop: hand the clip to the STT thread (or the uplink process) and return at once."""
+        if self.uplink is not None:
+            error = self.uplink.transcribe(clip_id, incident_id)
+            if error:
+                log.warning("transcribe refused: %s clip=%s", error, clip_id)
+                self._queue("speech_text", speech={"clip_id": clip_id, "error": error}, incident_id=incident_id)
+            return
         if self.stt is None or self.http is None:
             log.warning("transcribe refused: speech-to-text is off on this Pi clip=%s", clip_id)
             self._queue("speech_text", speech={"clip_id": clip_id, "error": "speech-to-text is off on the Pi"},
@@ -888,6 +949,9 @@ def main():
     ap.add_argument("--offline", action="store_true", help="never contact the backend")
     ap.add_argument("--no-ack", action="store_true", help="with --stdin: the fake latch never answers ACK,U")
     ap.add_argument("--exit-on-eof", action="store_true", help="stop once stdin closes and the outbox is empty")
+    ap.add_argument("--uplink-socket", metavar="PATH",
+                    help="safety process only: HTTP and speech-to-text run in edge/uplink.py (see supervisor.py)")
+    ap.add_argument("--resume", action="store_true", help="with --uplink-socket: pick up the open incident after a restart")
     args = ap.parse_args()
 
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -907,8 +971,9 @@ def main():
         source = SerialSource(args.serial, config.SERIAL_BAUD)
     else:
         sys.exit("no serial port: pass --serial PORT, --usb, or set SERIAL_PORT in .env")
+    split = bool(args.uplink_socket)
     stt = None
-    if config.WHISPER_MODEL:
+    if config.WHISPER_MODEL and not split:
         if Path(config.WHISPER_MODEL).is_file() and shutil.which(config.WHISPER_BIN):
             stt = Transcriber(config.WHISPER_MODEL)
         else:
@@ -916,13 +981,22 @@ def main():
     node = Node(
         device_id=config.DEVICE_ID, secret=config.SHARED_SECRET,
         write_serial=source.write,
-        http=None if args.offline else UrlHttp(args.backend, config.HTTP_TIMEOUT_S),
+        http=None if args.offline or split else UrlHttp(args.backend, config.HTTP_TIMEOUT_S),
         outbox_path=config.LOG_DIR / "outbox.jsonl",
         stt=stt,
+        state_path=config.LOG_DIR / "incident.json" if split else None,
+        resume=args.resume,
     )
-    log.info("edge node up device_id=%s backend=%s speech_to_text=%s", config.DEVICE_ID,
-             "offline" if args.offline else args.backend,
-             " ".join(stt.server_cmd or stt.cmd) if stt else "off")
+    server = None
+    if split:
+        from edge.link import UplinkServer
+        server = node.uplink = UplinkServer(node, args.uplink_socket)
+        log.info("safety process up device_id=%s pid=%d uplink_socket=%s resume=%s", config.DEVICE_ID,
+                 os.getpid(), args.uplink_socket, args.resume)
+    else:
+        log.info("edge node up device_id=%s backend=%s speech_to_text=%s", config.DEVICE_ID,
+                 "offline" if args.offline else args.backend,
+                 " ".join(stt.server_cmd or stt.cmd) if stt else "off")
 
     def stop(signum, frame):
         raise KeyboardInterrupt
@@ -934,7 +1008,8 @@ def main():
     try:
         if stt:
             stt.start()
-        node.start_network()
+        if not split:
+            node.start_network()
         while True:
             if args.usb:
                 source.reconnect()
@@ -942,6 +1017,8 @@ def main():
             if line:
                 node.handle_line(line)
             node.tick()
+            if server:
+                server.pump()
             if args.exit_on_eof and source.eof and (node.http is None or not len(node.outbox)):
                 break
     except KeyboardInterrupt:
@@ -951,6 +1028,8 @@ def main():
         raise
     finally:
         node.stop_network()
+        if server:
+            server.close()
         if stt:
             stt.close()
         if args.usb:

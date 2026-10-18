@@ -103,6 +103,9 @@ AGENTS.md  IMPLEMENTATION.md  TODOS.md  .env.example
 arduino/hub/hub.ino            sensors, simulated latch (LED + relock timer), buzzer, serial protocol
 edge/                          runs on the Pi (QNX), plain Python, no heavy deps
   sensor_node.py               serial reader, fusion, local incident, event posting, command polling
+  supervisor.py                QNX process split: safety (prio 21), uplink (10), whisper-server (8); restarts them
+  uplink.py                    HTTP to the backend for the split mode; signs nothing
+  link.py                      Unix-socket link between the safety process and the uplink
   security.py                  HMAC verify, freshness, nonce cache
   config.py                    thresholds (from calibration data) + env
   sim_sensors.py               fake serial feed for laptop testing
@@ -185,7 +188,7 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 - 30-second cooldown after each event, so one fall can't trigger twice.
 - **Thresholds come from calibration data**, not guesses: ~20 trials each of `fall_beanbag`, `sit_mat`, `bottle_drop`, `door_slam`, `footsteps`, `clap`, logged to CSV with labels. Commit the final numbers in `edge/config.py`. Recheck in the demo room.
 - The local incident and alarm have no timeout: they stay up until a signed `alarm_off` (a clear "I'm fine", a resolve) or a demo `reset`. Only unlocks expire with the window.
-- HTTP runs on its own thread; the sensor loop never waits on the network.
+- HTTP runs on its own thread; the sensor loop never waits on the network. With `edge/supervisor.py` it runs in a separate, lower-priority uplink process that holds no signing role (`IMPLEMENTATION.md` 6.9).
 - On `fall_suspected` the Pi, **before any network call**: opens a local incident, starts the clock, turns the buzzer on, shows `TIME DOWN mm:ss`. Then it tries to POST. Unreachable backend → keep going locally, log to file, replay when the network returns.
 
 ## Latency (measure everything in Sentry; quote only measured numbers)

@@ -57,7 +57,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (A) Live check of an all-silent recording with Pi speech-to-text (unit-tested only)
 - [ ] (B) Rules don't read hedged amounts like "a little, not very much" (moving); StepFun may fill it, but only when its reply lands before the incident ends
 - [x] (B · Droid) StepFun live on the port-8002 test backend (`edge/box3-voice`): rules win, the model only adds worrying answers, stale results carry forward. Measured 5-38 s on `low`; 45 s timeout, `max_tokens` 5000
-- [ ] (A) Split the Pi safety node into separate QNX processes (#22 step 1), on its own branch
+- [ ] (A · Droid) Split the Pi safety node into separate QNX processes (#22 step 1), branch `edge/qnx-process-split`: `supervisor.py` runs safety (prio 21), uplink (10), whisper-server (8); Unix-socket link, uplink signs nothing, restarted safety resumes its incident. Tests pass and a laptop run survived `kill -9` of each process; Pi run pending
 - [ ] (C) Photon gateway: text out, reply in (90-minute cap, then simulator)
 - [ ] (D) Sentry tracing spans + uptime monitor on tunneled `/health`
 - [x] (A · Codex) Local BOX-3 alarm + `TIME DOWN` with test backend paused; operator confirmed alarm, ticking clock, and locked latch; incident replayed on reconnect
