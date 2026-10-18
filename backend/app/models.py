@@ -124,7 +124,45 @@ DashboardEventType = Literal[
     "script_done",  # the fixed questions are over; the dashboard starts the companion agent
     # issue #23: honest delivery states, who is coming, voice escalation
     "delivery_status", "responder_update", "call_update",
+    "stepfun_call",  # issue #24: one per step-5-preview call (triage, rewrite, answer), with latency and outcome
 ]
+
+# What a finished StepFun call came to. "invalid": bad JSON, a record that failed validation, or a
+# rewrite/answer that broke a rule (too long, added numbers). "error": HTTP or network failure.
+StepFunOutcome = Literal["ok", "timeout", "invalid", "error"]
+
+
+class StepFunCall(BaseModel):
+    """stepfun_call: one runtime call. Never carries the prompt, the reply text or a phone number."""
+
+    kind: Literal["triage", "rewrite", "answer"]
+    model: str
+    ms: int
+    outcome: StepFunOutcome
+    fallback: Optional[str] = None  # what was used instead: "rules", "original text", "template"
+    reason: Optional[str] = None
+    deadline_s: float
+    incident_id: Optional[str] = None
+
+
+class StepFunTriageView(BaseModel):
+    """triage_update.model: step-5-preview's own triage record, next to the rules record.
+
+    status: "off" (rules only), "waiting" (no answer yet), "pending" (a call is running),
+    or the last finished call's outcome. record/ms/answers_seen describe that last finished
+    call; while pending they still show it. added: fields where the record in use differs from
+    the rules (the model added them). overruled: fields where the model said something the
+    record in use does not (the rules kept their answer)."""
+
+    name: Optional[str] = None
+    status: Literal["off", "waiting", "pending", "ok", "timeout", "invalid", "error"]
+    ms: Optional[int] = None
+    deadline_s: Optional[float] = None
+    reason: Optional[str] = None
+    record: Optional[dict] = None
+    answers_seen: int = 0
+    added: list[str] = Field(default_factory=list)
+    overruled: list[str] = Field(default_factory=list)
 
 
 class DashboardEvent(BaseModel):

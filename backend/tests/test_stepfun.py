@@ -320,3 +320,159 @@ def test_dashboard_can_tell_unclear_from_unsaid():
     assert snap["answered"] == ["ok", "head"] and snap["triage"]["head_strike"] is None
     ev = [e for e in c.app.state.events if e.type == "triage_update"][-1]
     assert ev.data["answered"] == ["ok", "head"]
+
+
+# --- visible on the dashboard (issue #24) ---------------------------------------------
+
+FACTS = {"patient": "Margaret", "pronoun": "she", "time_down": "1 min 05 s", "triage_summary": "Conscious.",
+         "last_answer": "Yes", "responders": []}
+
+
+def test_triage_detail_reports_the_model_record_and_latency():
+    out = sf(FakeTransport(GOOD), triage_timeout_s=3.0).triage_detail(ANSWERS, DEMO_PROFILE)
+    assert out.status == "ok" and out.ms is not None and out.deadline_s == 3.0 and out.reason is None
+    assert out.model_record["pain_location"] == "right hip" and out.model_record["summary"] == GOOD["summary"]
+    assert out.record.summary == GOOD["summary"]
+
+
+@pytest.mark.parametrize("transport, kw, status, reason", [
+    (FakeTransport(GOOD, delay=1.0), {"triage_timeout_s": 0.1}, "timeout", "timeout"),
+    (FakeTransport("not json"), {}, "invalid", "bad json"),
+    (FakeTransport({**GOOD, "conscious": "yes"}), {}, "invalid", "invalid record (1 errors)"),
+    (FakeTransport(raise_=urllib.error.HTTPError("u", 401, "unauthorized", {}, None)), {}, "error", "http 401"),
+    # The raw network error names hosts; the dashboard only gets the category.
+    (FakeTransport(raise_=urllib.error.URLError("api.internal.example refused")), {}, "error", "network error"),
+])
+def test_triage_detail_names_the_fallback(transport, kw, status, reason):
+    out = sf(transport, **kw).triage_detail(ANSWERS, DEMO_PROFILE)
+    assert (out.status, out.reason, out.model_record) == (status, reason, None)
+    assert out.record == parse_rules(ANSWERS, DEMO_PROFILE)
+
+
+def test_stub_triage_detail_is_off_and_reports_no_call():
+    calls = []
+    out = sf(FakeTransport(GOOD), stub=True, on_call=calls.append).triage_detail(ANSWERS, DEMO_PROFILE)
+    assert out.status == "off" and out.ms is None and calls == []
+
+
+def test_every_call_is_reported_with_kind_latency_outcome_and_fallback():
+    calls = []
+    s = sf(FakeTransport("Help is on the way."), on_call=calls.append,
+           timeout_s=3.0, answer_timeout_s=4.0, triage_timeout_s=5.0)
+    s.rewrite("omw")
+    s.triage(ANSWERS, DEMO_PROFILE)  # plain text is bad JSON for triage
+    s.answer("Is she awake?", FACTS)  # and for the answer
+    assert [(c.kind, c.outcome, c.fallback, c.reason, c.deadline_s) for c in calls] == [
+        ("rewrite", "ok", None, None, 3.0),
+        ("triage", "invalid", "rules", "bad json", 5.0),
+        ("answer", "invalid", "template", "bad json", 4.0),
+    ]
+    assert all(c.model == "step-5-preview" and c.ms >= 0 for c in calls)
+    # The call log never carries what anyone said.
+    assert all("omw" not in c.model_dump_json() and "awake" not in c.model_dump_json() for c in calls)
+
+
+def test_a_rewrite_past_its_deadline_is_reported_as_a_timeout():
+    calls = []
+    s = sf(FakeTransport("Calm.", delay=1.0), timeout_s=0.1, on_call=calls.append)
+    assert s.rewrite("on my way") == "on my way"
+    c = calls[0]
+    assert (c.kind, c.outcome, c.fallback, c.deadline_s) == ("rewrite", "timeout", "original text", 0.1)
+
+
+def test_a_broken_call_log_never_breaks_the_call():
+    def boom(_call):
+        raise RuntimeError("dashboard gone")
+
+    assert sf(FakeTransport("Help is coming."), on_call=boom).rewrite("on my way") == "Help is coming."
+
+
+def _model_app(transport):
+    return LaptopClient(create_app(settings(STUB_STEPFUN=False, STEPFUN_API_KEY="k", STEPFUN_BASE_URL="https://x/v1",
+                                            STEPFUN_TRANSPORT=transport)))
+
+
+def _wait_for(c, pred):
+    for _ in range(200):
+        hits = [e.data for e in list(c.app.state.events) if pred(e)]
+        if hits:
+            return hits[-1]
+        time.sleep(0.01)
+    raise AssertionError("event never arrived")
+
+
+def test_dashboard_sees_rules_and_model_side_by_side_and_every_call():
+    model = {"conscious": True, "head_strike": True, "pain_location": None, "can_move": None,
+             "bleeding": False, "summary": "Needs help. Hit head on the tub. Denies bleeding."}
+
+    def transport(url, headers, body, timeout):
+        content = json.dumps(model) if body.get("response_format") else "Help is on the way."
+        return {"choices": [{"message": {"content": content}}]}
+
+    c = _model_app(transport)
+    post_event(c)
+    snap = c.post("/person/answer", json={"text": "help, my head smacked the tub"}).json()
+    first = next(e.data for e in c.app.state.events if e.type == "triage_update")
+    assert first["model"]["status"] == "pending" and first["model"]["record"] is None
+    assert first["rules"] == first["triage"] and first["model"]["added"] == []
+    assert snap["state"] == "ALERTING"  # the rules escalated; the model was still thinking
+
+    done = _wait_for(c, lambda e: e.type == "triage_update" and e.data["model"]["status"] == "ok")
+    m = done["model"]
+    assert m["name"] == "step-5-preview" and m["ms"] is not None and m["deadline_s"] == 45.0
+    assert m["answers_seen"] == 1 and m["record"]["head_strike"] is True
+    assert done["rules"]["head_strike"] is None and done["triage"]["head_strike"] is True
+    assert m["added"] == ["head_strike"]  # the worrying answer the rules missed
+    assert m["overruled"] == ["bleeding"]  # "denies bleeding" is a reassurance nobody heard
+    assert done["triage"]["bleeding"] is None
+    assert done["triage"]["summary"] != model["summary"]  # templated, since a field was overruled
+
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "hang tight, love you"})
+    calls = [e.data for e in c.app.state.events if e.type == "stepfun_call"]
+    assert sorted(x["kind"] for x in calls) == ["rewrite", "triage"]
+    assert all(x["outcome"] == "ok" and x["fallback"] is None and x["incident_id"] for x in calls)
+    assert all(CAREGIVER not in json.dumps(x) and "hang tight" not in json.dumps(x) for x in calls)
+
+    with c.websocket_connect("/ws/dashboard") as ws:  # a reconnect keeps the call log
+        d = ws.receive_json()["data"]
+    assert d["stepfun"]["enabled"] is True and d["stepfun"]["model"] == "step-5-preview"
+    assert [x["kind"] for x in d["stepfun_calls"]] == [x["kind"] for x in calls]
+    assert d["model"]["status"] == "ok" and d["rules"]["head_strike"] is None
+
+
+def test_a_summary_the_model_wrote_is_marked_as_added():
+    only_help = {**GOOD, "head_strike": None, "pain_location": None, "summary": "Needs help after a fall."}
+
+    def transport(url, headers, body, timeout):
+        return {"choices": [{"message": {"content": json.dumps(only_help)}}]}
+
+    c = _model_app(transport)
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    done = _wait_for(c, lambda e: e.type == "triage_update" and e.data["model"]["status"] == "ok")
+    assert done["model"]["added"] == ["summary"] and done["model"]["overruled"] == []
+    assert done["triage"]["summary"] == "Needs help after a fall."
+
+
+def test_a_failed_model_call_shows_the_rules_fallback():
+    def transport(url, headers, body, timeout):
+        raise urllib.error.HTTPError(url, 500, "server error", {}, None)
+
+    c = _model_app(transport)
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    done = _wait_for(c, lambda e: e.type == "triage_update" and e.data["model"]["status"] != "pending")
+    assert done["model"]["status"] == "error" and done["model"]["reason"] == "http 500"
+    assert done["model"]["record"] is None and done["model"]["added"] == []
+    assert done["triage"] == done["rules"]
+    call = _wait_for(c, lambda e: e.type == "stepfun_call")
+    assert (call["kind"], call["outcome"], call["fallback"]) == ("triage", "error", "rules")
+
+
+def test_rules_only_app_says_so_and_reports_no_calls():
+    c = LaptopClient(create_app(settings()))
+    post_event(c)
+    snap = c.post("/person/answer", json={"text": "help"}).json()
+    assert snap["model"]["status"] == "off" and snap["model"]["name"] is None and snap["model"]["record"] is None
+    assert snap["rules"] == snap["triage"]
+    assert not [e for e in c.app.state.events if e.type == "stepfun_call"]
