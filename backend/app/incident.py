@@ -25,8 +25,8 @@ from .comms import format_alert
 from .coordinator import (Commitment, claimer_reply, incident_facts, is_question, parse_commitment,
                           spoken_line, stand_by_text, status_answer)
 from .models import IncidentState as S
-from .models import TriageRecord
-from .triage import QUESTIONS, carry_forward, is_clear_fine, parse_rules
+from .models import StepFunTriageView, TriageRecord
+from .triage import QUESTIONS, TriageOutcome, carry_forward, is_clear_fine, parse_rules
 from .unlock import UnlockGuard, is_unlock_attempt
 from .voice import ASSISTANT_LINE
 
@@ -34,6 +34,7 @@ log = logging.getLogger("firsthour.incident")
 
 REASK_LINE = "Sorry, I didn't catch that."
 MAX_TRIES = 2  # asks per question after the alert; then it stays unknown and the script moves on
+TRIAGE_FIELDS = ("conscious", "head_strike", "pain_location", "can_move", "bleeding")
 CLOSING_LINE = "Thank you. That's all my questions."
 RELAY_MAX = 6  # companion relays per incident, so a looping agent can't flood the caregiver
 RELAY_MAX_CHARS = 300
@@ -52,6 +53,8 @@ class Incident:
     triage: TriageRecord = field(default_factory=TriageRecord)
     unlocked_until: Optional[float] = None
     refining: bool = False  # a StepFun refinement is in flight
+    model_result: Optional[TriageOutcome] = None  # the last finished refinement, for the dashboard
+    model_seen: int = 0  # answers that refinement saw
     alerted_at: Optional[float] = None
     responders: dict[str, dict] = field(default_factory=dict)  # number -> status, eta_min, name
     claimed_by: Optional[str] = None  # first clear "on my way"
@@ -95,7 +98,7 @@ class IncidentMachine:
         speak: Callable[[str], None] = _noop,
         send_alert: Callable[[str, str], None] = _noop,
         on_close: Callable[[Incident, S], None] = _noop,
-        triage_fn: Callable[[list, dict], TriageRecord] = parse_rules,
+        triage_fn: Callable[[list, dict], TriageRecord | TriageOutcome] = parse_rules,
         rewrite_fn: Callable[[str], str] = lambda text: text,
         background: Callable[[Callable[[], None]], None] = _in_thread,
         send_text: Callable[[str, list[str], str, str], None] = _noop,
@@ -105,6 +108,7 @@ class IncidentMachine:
         names: Optional[dict[str, str]] = None,
         call_after_s: Optional[float] = 20,
         reask: bool = False,
+        model: Optional[str] = None,
     ):
         self.guard = guard
         self.profile = profile
@@ -120,6 +124,7 @@ class IncidentMachine:
         self._send_alert = send_alert
         self._on_close = on_close
         self._triage_fn = triage_fn  # StepFun with rule fallback, or rules only
+        self.model = model  # name of the model refining triage in the background; None = rules only
         self._rewrite_fn = rewrite_fn
         self._background = background  # runs the StepFun refinement; tests pass a synchronous one
         self._send_text = send_text  # (incident_id, to, text, kind); never the code
@@ -172,6 +177,7 @@ class IncidentMachine:
             "transcript": [{"q": dict(QUESTIONS)[k], "a": a} for k, a in inc.answers],
             "answered": _answered(inc),
             "triage": inc.triage.model_dump(),
+            **self._triage_sources(inc),
             "responders": self._responders(inc),
             "calls": len(inc.calls),
         }
@@ -245,6 +251,9 @@ class IncidentMachine:
 
             inc.question_index += 1
             answers = list(inc.answers)
+            # One StepFun call per incident at a time: answers come every 2-10 s and a call
+            # takes 5-38 s, so the running one picks up whatever arrived meanwhile.
+            start, inc.refining = not inc.refining, True
             # Escalate on the instant rule-based record: the alert never waits on StepFun.
             inc.triage = parse_rules(answers, self.profile)
             self._emit_triage(inc)
@@ -252,9 +261,6 @@ class IncidentMachine:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
             self._ask()
             self._maybe_script_done(inc)
-            # One StepFun call per incident at a time: answers come every 2-10 s and a call
-            # takes 5-38 s, so the running one picks up whatever arrived meanwhile.
-            start, inc.refining = not inc.refining, True
 
         # StepFun takes seconds; the caller (and the person's next answer) never waits on it.
         if start:
@@ -279,20 +285,27 @@ class IncidentMachine:
             while True:
                 with self._lock:
                     answers = list(inc.answers)
-                triage = self._triage_fn(answers, self.profile)  # StepFun: up to 45 s, then rules
+                out = self._triage_fn(answers, self.profile)  # StepFun: up to 45 s, then rules
+                if not isinstance(out, TriageOutcome):
+                    out = TriageOutcome(out)
+                triage = out.record
                 with self._lock:
                     if self.incident is not inc:
                         return  # the incident ended while the model was thinking
+                    # A finished model call is news for the dashboard even if the record is unchanged.
+                    shown = self.model is not None
+                    if shown:
+                        inc.model_result, inc.model_seen = out, len(answers)
                     if len(inc.answers) != len(answers):
                         # Stale, and with live speech nearly every call is: keep what it learned,
                         # then run once more on the latest answers.
                         carried = carry_forward(triage, parse_rules(list(inc.answers), self.profile))
-                        if carried != inc.triage:
+                        if carried != inc.triage or shown:
                             inc.triage = carried
                             self._emit_triage(inc)
                         continue
                     inc.refining = False
-                    if triage != inc.triage:
+                    if triage != inc.triage or shown:
                         inc.triage = triage
                         self._emit_triage(inc)
                     return
@@ -300,6 +313,9 @@ class IncidentMachine:
             log.exception("triage refinement failed incident_id=%s", inc.id)
             with self._lock:
                 inc.refining = False
+                if self.model is not None and self.incident is inc:
+                    inc.model_result = TriageOutcome(inc.triage, "error", reason="refinement failed")
+                    self._emit_triage(inc)
 
     def on_help_button(self, device_id: Optional[str] = None) -> None:
         """device_id: the node whose button was pressed; another node's button never
@@ -526,9 +542,38 @@ class IncidentMachine:
 
     def _emit_triage(self, inc: Incident) -> None:
         self._emit("triage_update", {"incident_id": inc.id, "triage": inc.triage.model_dump(),
+                                     **self._triage_sources(inc),
                                      "transcript": [a for _, a in inc.answers],
                                      "answered": _answered(inc),
                                      "current_question": self._current_question()})
+
+    def _triage_sources(self, inc: Incident) -> dict:
+        """The rules record and the model's own record side by side, so the operator can see
+        what each one understood and which fields of the record in use came from the model."""
+        rules = parse_rules(list(inc.answers), self.profile)
+        used = inc.triage
+        r = inc.model_result
+        record = r.model_record if r else None
+        added = [f for f in TRIAGE_FIELDS if getattr(used, f) != getattr(rules, f)]
+        # A record with a changed field gets a templated summary, so "summary" means the model wrote it.
+        if record and used.summary == record.get("summary") and used.summary != rules.summary:
+            added.append("summary")
+        if self.model is None:
+            status = "off"
+        elif inc.refining:
+            status = "pending"
+        elif r is None:
+            status = "waiting"
+        else:
+            status = r.status
+        view = StepFunTriageView(
+            name=self.model, status=status, ms=r.ms if r else None, deadline_s=r.deadline_s if r else None,
+            reason=r.reason if r else None, record=record, answers_seen=inc.model_seen if r else 0,
+            added=added,
+            overruled=[f for f in TRIAGE_FIELDS
+                       if record and record.get(f) is not None and record.get(f) != getattr(used, f)],
+        )
+        return {"rules": rules.model_dump(), "model": view.model_dump()}
 
     def _responders(self, inc: Incident) -> list[dict]:
         return [{"number": n, **r, "assigned": n == inc.claimed_by} for n, r in inc.responders.items()]

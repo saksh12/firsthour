@@ -20,11 +20,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .models import TriageRecord
+from .models import StepFunCall, TriageRecord
 
 log = logging.getLogger("firsthour.triage")
 
@@ -284,6 +285,39 @@ class StepFunError(Exception):
     pass
 
 
+# What each call falls back to when step-5-preview fails or misses its deadline.
+FALLBACK = {"triage": "rules", "rewrite": "original text", "answer": "template"}
+
+
+def call_outcome(reason: Optional[str]) -> str:
+    """ok | timeout | error (HTTP/network) | invalid (anything the model returned that we refused)."""
+    if reason is None:
+        return "ok"
+    if reason == "timeout":
+        return "timeout"
+    if reason.startswith(("http", "network")):
+        return "error"
+    return "invalid"
+
+
+def _public_reason(reason: Optional[str]) -> Optional[str]:
+    # A network error's text names hosts and sockets; the dashboard only needs the category.
+    return "network error" if reason and reason.startswith("network") else reason
+
+
+@dataclass
+class TriageOutcome:
+    """A triage call's result for the dashboard. record is what the incident uses (rules, or
+    rules merged with the model); model_record is what the model itself returned, if valid."""
+
+    record: TriageRecord
+    status: str = "off"  # off | ok | timeout | invalid | error
+    ms: Optional[int] = None
+    deadline_s: Optional[float] = None
+    reason: Optional[str] = None
+    model_record: Optional[dict] = None
+
+
 # Span hook: (op, name=None, parent=None, **data) -> context manager yielding a span or None.
 # main.py passes Telemetry.span bound to the current incident; tests and stub mode trace nothing.
 SpanHook = Callable[..., ContextManager[Any]]
@@ -347,7 +381,8 @@ class StepFun:
     def __init__(self, *, api_key: str, base_url: str, model: str = "step-5-preview",
                  stub: bool = True, timeout_s: float = 10.0, triage_timeout_s: float = 45.0,
                  answer_timeout_s: float = 12.0, transport: Transport = urllib_transport,
-                 span: SpanHook = _no_span):
+                 span: SpanHook = _no_span,
+                 on_call: Optional[Callable[[StepFunCall], None]] = None):
         self.enabled = not stub and bool(api_key) and bool(base_url)
         if not stub and not self.enabled:
             log.warning("STUB_STEPFUN=0 but STEPFUN_API_KEY/STEPFUN_BASE_URL missing; using rules only")
@@ -361,6 +396,7 @@ class StepFun:
         self.timeout_s, self.triage_timeout_s = timeout_s, triage_timeout_s
         self.answer_timeout_s = answer_timeout_s
         self._transport = transport
+        self.on_call = on_call  # every finished call, for the dashboard's call log
         self._span = span
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
@@ -405,14 +441,17 @@ class StepFun:
                 raise StepFunError("unexpected response shape")
 
     def triage(self, answers: list[tuple[str, str]], profile: dict) -> TriageRecord:
+        return self.triage_detail(answers, profile).record
+
+    def triage_detail(self, answers: list[tuple[str, str]], profile: dict) -> TriageOutcome:
         with self._span("stepfun_triage") as stage:
             return self._triage(answers, profile, stage)
 
-    def _triage(self, answers: list[tuple[str, str]], profile: dict, stage: Any) -> TriageRecord:
+    def _triage(self, answers: list[tuple[str, str]], profile: dict, stage: Any) -> TriageOutcome:
         rules = parse_rules(answers, profile)
         if not self.enabled or not answers:
             _annotate(stage, result="rules", fallback_reason="model off" if not self.enabled else "no answers")
-            return rules
+            return TriageOutcome(rules)
         t0 = time.monotonic()
         try:
             # Reasoning counts against max_tokens. Measured Oct 18: unclear answers took up to
@@ -430,14 +469,14 @@ class StepFun:
             except ValidationError as e:
                 raise StepFunError(f"invalid record ({e.error_count()} errors)")
         except StepFunError as e:
-            self._log("triage", t0, False, str(e), stage)
-            return rules
-        self._log("triage", t0, True, None, stage)
+            ms = self._log("triage", t0, False, str(e), stage)
+            return TriageOutcome(rules, call_outcome(str(e)), ms, self.triage_timeout_s, _public_reason(str(e)))
+        ms = self._log("triage", t0, True, None, stage)
         rec, kept = merge_model(rules, m)
         if kept:
             log.info("stepfun triage: rules kept for fields=%s", ",".join(kept))
             _annotate(stage, rules_kept=",".join(kept))
-        return rec
+        return TriageOutcome(rec, "ok", ms, self.triage_timeout_s, model_record=m.model_dump())
 
     def rewrite(self, text: str) -> str:
         if not self.enabled or not text.strip():
@@ -502,7 +541,7 @@ class StepFun:
         self._log("answer", t0, True, None, stage)
         return "answer", text
 
-    def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str], stage: Any = None) -> None:
+    def _log(self, call: str, t0: float, ok: bool, fallback_reason: Optional[str], stage: Any = None) -> int:
         ms = int((time.monotonic() - t0) * 1000)
         _annotate(stage, model_ms=ms, result="model" if ok else "fallback", fallback_reason=fallback_reason)
         if ok:
@@ -510,3 +549,13 @@ class StepFun:
         else:
             log.warning("stepfun call=%s model=%s ms=%d ok=False fallback=rules reason=%s",
                         call, self.model, ms, fallback_reason)
+        if self.on_call:
+            deadline = {"triage": self.triage_timeout_s, "rewrite": self.timeout_s,
+                        "answer": self.answer_timeout_s}[call]
+            try:
+                self.on_call(StepFunCall(kind=call, model=self.model, ms=ms, outcome=call_outcome(fallback_reason),
+                                         fallback=None if ok else FALLBACK[call],
+                                         reason=_public_reason(fallback_reason), deadline_s=deadline))
+            except Exception:  # the call log is for display; it never breaks the incident flow
+                log.exception("stepfun call log failed")
+        return ms

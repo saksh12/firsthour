@@ -76,12 +76,22 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .door .door-note { color: var(--dim); font-size: 14px; min-height: 21px; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.triage-rows { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; align-items: center; margin: 0; }
-.triage-rows dt { color: var(--dim); font-size: 15px; }
-.triage-rows dd { margin: 0; font-weight: 600; font-size: 17px; }
 .v-yes { color: var(--alert); } .v-no { color: var(--open); } .v-unk { color: var(--dim); font-weight: 500; }
 .v-plain { color: var(--text); }
 .summary { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 15px; }
+.summary .meta { display: block; font-size: 12px; color: var(--dim); margin-top: 2px; }
+.tri { width: 100%; border-collapse: collapse; font-size: 15px; }
+.tri th { text-align: left; font-size: 12px; font-weight: 600; color: var(--dim); padding: 0 8px 6px 0; vertical-align: bottom; }
+.tri td { padding: 5px 8px 5px 0; border-top: 1px solid var(--line); vertical-align: baseline; }
+.tri td:first-child { color: var(--dim); }
+.tri td.used { font-weight: 600; font-size: 16px; }
+.tri td.overruled { text-decoration: line-through; }
+.tri .from { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--resp); }
+.sf-badge { display: inline-block; margin-top: 2px; font-size: 11px; font-weight: 700; letter-spacing: .02em; padding: 1px 6px; border-radius: 6px; white-space: nowrap; }
+.sf-badge.ok { color: var(--open); background: var(--open-bg); }
+.sf-badge.wait { color: var(--check); background: var(--check-bg); }
+.sf-badge.no { color: var(--alert); background: var(--alert-bg); }
+.sf-badge.off { color: var(--idle); background: var(--idle-bg); }
 .source { color: var(--dim); font-size: 12px; margin-top: 8px; }
 
 .qa { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -192,9 +202,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
 
     <div class="panel">
       <p class="label">Triage</p>
-      <dl class="triage-rows" id="triage"></dl>
+      <table class="tri">
+        <thead><tr><th>Field</th><th>Rules</th><th id="tri-model-head">step-5-preview</th><th>Used</th></tr></thead>
+        <tbody id="triage"></tbody>
+      </table>
       <div class="summary" id="summary"></div>
-      <div class="source">Structured from her own words. Blood thinner comes from her profile, not the AI.</div>
+      <div class="source" id="triage-source">Structured from her own words. Used = the rules' answer wherever they heard one; the model can only add a head strike, "can't move" or bleeding the rules missed, and name the pain location. Crossed out = the rules kept their answer. Blood thinner comes from her profile, not the AI. — = not stated.</div>
     </div>
 
     <div class="panel">
@@ -241,6 +254,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       <div class="op-msg" id="op-msg"></div>
     </div>
 
+    <div class="panel">
+      <p class="label">StepFun calls</p>
+      <ul class="attempts" id="sf-calls"><li class="empty">No calls yet.</li></ul>
+      <div class="source" id="sf-config"></div>
+    </div>
+
     <div class="panel full">
       <p class="label">Event log</p>
       <ul class="log" id="log"></ul>
@@ -275,13 +294,90 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   const $ = (id) => document.getElementById(id);
 
   let view = blank();
+  let stepfunConfig = null;  // {model, enabled, deadlines_s} from the snapshot
   let localUnlockUntil = 0;
   let unlockFailed = false; // the Pi sent U but the latch never answered ACK,U
 
   function blank() {
     return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null,
-             responders: {}, delivery: "", calls: "", companionReady: false };
+             responders: {}, delivery: "", calls: "", companionReady: false,
+             rules: null, model: null, stepfunCalls: [], lastCall: {} };
   }
+
+  // --- StepFun view (pure; dashboard/stepfun.test.cjs runs this block) ------
+  // Labels say what happened and what was measured: latency is the backend's own timing of
+  // each call, and a fallback names what was used instead and why.
+  const stepfunView = (() => {
+    const KIND = { triage: "triage", rewrite: "reply rewrite", answer: "caregiver Q&A" };
+    const FIELDS = [
+      ["Responding", "conscious", null],
+      ["Hit head", "head_strike", "head"],
+      ["Pain", "pain_location", "pain"],
+      ["Can move legs", "can_move", "move"],
+      ["Bleeding", "bleeding", "bleeding"],
+    ];
+    const secs = (ms) => (ms / 1000).toFixed(1) + " s";
+    function why(outcome, reason, deadlineS) {
+      if (outcome === "timeout") return deadlineS != null ? "timeout " + Number(deadlineS) + " s" : "timeout";
+      return reason || outcome;
+    }
+    function callRow(c) {
+      const ok = c.outcome === "ok";
+      return {
+        pill: String(c.outcome).toUpperCase(), cls: ok ? "ok" : "no",
+        what: (KIND[c.kind] || c.kind) + " · " + secs(c.ms),
+        note: ok ? c.model : "fallback: " + (c.fallback || "rules") + " (" + why(c.outcome, c.reason, c.deadline_s) + ")",
+      };
+    }
+    // Badge under the model column header. nAnswers: answers so far, to flag a result on fewer.
+    function modelBadge(m, nAnswers) {
+      if (!m || m.status === "off") return { text: "off: rules only", cls: "off" };
+      const name = m.name || "step-5-preview";
+      const seen = m.record && m.answers_seen < nAnswers ? " · saw " + m.answers_seen + " of " + nAnswers + " answers" : "";
+      if (m.status === "waiting") return { text: "waiting for her answer", cls: "off" };
+      if (m.status === "pending") return { text: "model: pending…" + seen, cls: "wait" };
+      if (m.status === "ok") return { text: name + (m.ms != null ? ", " + secs(m.ms) : "") + seen, cls: "ok" };
+      return { text: "fallback: rules (" + why(m.status, m.reason, m.deadline_s) + ")", cls: "no" };
+    }
+    function show(field, v) {
+      if (v === null || v === undefined) return ["—", "v-unk"];
+      if (field === "pain_location") return [String(v), "v-plain"];
+      if (field === "conscious") return v ? ["Yes, talking", "v-no"] : ["No", "v-yes"];
+      if (field === "can_move") return v ? ["Yes", "v-no"] : ["No", "v-yes"];
+      return v ? ["Yes", "v-yes"] : ["No", "v-no"];
+    }
+    // One row per field: rules, the model's own answer, and the record in use. An unknown in
+    // the record in use says whether she answered (Unclear) or not (Not said).
+    function rows(used, rules, model, answered) {
+      used = used || {}; rules = rules || used; answered = answered || [];
+      const rec = model && model.record;
+      const added = (model && model.added) || [], overruled = (model && model.overruled) || [];
+      const out = FIELDS.map(([label, f, key]) => {
+        let u = show(f, used[f]);
+        if (used[f] == null) u = f === "conscious" ? ["Not yet", "v-unk"] : [answered.includes(key) ? "Unclear" : "Not said", "v-unk"];
+        const m = rec ? show(f, rec[f]) : [model && model.status === "pending" ? "…" : "—", "v-unk"];
+        return { label, rules: show(f, rules[f]), model: m, used: u, added: added.includes(f), overruled: !!rec && overruled.includes(f) };
+      });
+      const bt = used.on_blood_thinner;
+      out.push({ label: "Blood thinner", rules: ["n/a", "v-unk"], model: ["n/a", "v-unk"],
+                 used: bt === true ? ["Yes (profile)", "v-yes"] : bt === false ? ["No (profile)", "v-no"] : ["—", "v-unk"],
+                 added: false, overruled: false });
+      return out;
+    }
+    function summarySource(m) {
+      if (m && (m.added || []).includes("summary")) return "Summary written by " + (m.name || "step-5-preview") + ".";
+      return "Summary templated from the record above" + (m && m.record ? "; the model's own summary is not used when any field differs from it." : ".");
+    }
+    // What the convo row says about a caregiver text, with the StepFun call that handled it.
+    function messageNote(d, call) {
+      const tail = call ? (call.outcome === "ok" ? " (" + call.model + ", " + secs(call.ms) + ")" : " · " + callRow(call).note) : "";
+      if (d.question) return "question, answered by text" + tail;
+      if (!d.spoken) return "read aloud from a fixed template";
+      if (d.spoken !== d.text) return "read aloud as “" + d.spoken + "”" + tail;
+      return "read aloud as written" + (call && call.outcome !== "ok" ? tail : "");
+    }
+    return { callRow, modelBadge, rows, summarySource, messageNote };
+  })();
 
   // --- rendering -----------------------------------------------------------
 
@@ -341,35 +437,64 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     $("shackle").setAttribute("d", open ? "M34 44 V30 a14 14 0 0 1 28 0 V22" : "M34 44 V30 a14 14 0 0 1 28 0 V44");
   }
 
-  // She answered, but neither the rules nor StepFun could read it: her words are in the Q&A list.
-  function unknown(key) {
-    return view.answered.includes(key) ? ["Unclear", "v-unk"] : ["Not said", "v-unk"];
-  }
-
-  function yn(v, yesWord, noWord, key) {
-    if (v === true) return [yesWord, "v-yes"];
-    if (v === false) return [noWord, "v-no"];
-    return unknown(key);
-  }
-
+  // Rules and step-5-preview side by side. Unknowns she did answer show as Unclear: her words
+  // are in the "What she said" list.
   function renderTriage() {
     const t = view.triage || {};
-    const rows = [
-      ["Responding", t.conscious === true ? ["Yes, talking", "v-no"] : ["Not yet", "v-unk"]],
-      ["Hit head", yn(t.head_strike, "Yes", "No", "head")],
-      ["Pain", t.pain_location ? [t.pain_location, "v-plain"] : unknown("pain")],
-      ["Can move legs", t.can_move === true ? ["Yes", "v-no"] : t.can_move === false ? ["No", "v-yes"] : unknown("move")],
-      ["Bleeding", yn(t.bleeding, "Yes", "No", "bleeding")],
-      ["Blood thinner", t.on_blood_thinner === true ? ["Yes (profile)", "v-yes"] : t.on_blood_thinner === false ? ["No (profile)", "v-no"] : ["—", "v-unk"]],
-    ];
-    const dl = $("triage");
-    dl.replaceChildren();
-    for (const [k, [v, cls]] of rows) {
-      const dt = document.createElement("dt"); dt.textContent = k;
-      const dd = document.createElement("dd"); dd.textContent = v; dd.className = cls;
-      dl.append(dt, dd);
+    const body = $("triage");
+    body.replaceChildren();
+    const cell = ([text, cls], extra) => {
+      const td = document.createElement("td"); td.textContent = text; td.className = cls + (extra ? " " + extra : ""); return td;
+    };
+    for (const r of stepfunView.rows(t, view.rules, view.model, view.answered)) {
+      const tr = document.createElement("tr");
+      const label = document.createElement("td"); label.textContent = r.label;
+      const model = cell(r.model, r.overruled ? "overruled" : "");
+      if (r.overruled) model.title = "The rules kept their answer";
+      const used = cell(r.used, "used");
+      if (r.added) { const s = document.createElement("span"); s.className = "from"; s.textContent = "+ model"; used.append(s); }
+      tr.append(label, cell(r.rules), model, used);
+      body.append(tr);
     }
-    $("summary").textContent = view.incidentId ? (t.summary || "Waiting for her answer.") : "No incident.";
+    const head = $("tri-model-head");
+    const name = (view.model && view.model.name) || (stepfunConfig && stepfunConfig.model) || "step-5-preview";
+    head.replaceChildren(document.createTextNode(name));
+    const b = view.incidentId ? stepfunView.modelBadge(view.model, view.answers.length)
+      : stepfunConfig && !stepfunConfig.enabled ? stepfunView.modelBadge(null, 0) : null;
+    if (b) {
+      const span = document.createElement("span"); span.className = "sf-badge " + b.cls; span.textContent = b.text;
+      head.append(document.createElement("br"), span);
+    }
+    const summary = $("summary");
+    summary.textContent = view.incidentId ? (t.summary || "Waiting for her answer.") : "No incident.";
+    if (view.incidentId && t.summary) {
+      const m = document.createElement("span"); m.className = "meta"; m.textContent = stepfunView.summarySource(view.model);
+      summary.append(m);
+    }
+  }
+
+  function renderStepfunCalls() {
+    const ul = $("sf-calls");
+    if (!view.stepfunCalls.length) {
+      const li = document.createElement("li"); li.className = "empty";
+      li.textContent = stepfunConfig && !stepfunConfig.enabled
+        ? "StepFun is off (stub mode or no key): the rules handle everything, no model calls." : "No calls yet.";
+      ul.replaceChildren(li);
+    } else {
+      ul.replaceChildren(...view.stepfunCalls.slice().reverse().map((c) => {
+        const r = stepfunView.callRow(c);
+        const li = document.createElement("li");
+        const pill = document.createElement("span"); pill.className = "pill " + r.cls; pill.textContent = r.pill;
+        const what = document.createElement("span"); what.textContent = r.what;
+        const note = document.createElement("span"); note.className = "mono"; note.textContent = r.note;
+        li.append(pill, what, note);
+        return li;
+      }));
+    }
+    const d = stepfunConfig && stepfunConfig.deadlines_s;
+    $("sf-config").textContent = d
+      ? "Deadlines: triage " + d.triage + " s (in the background; the rules record drives the alert), reply rewrite " + d.rewrite + " s, caregiver Q&A " + d.answer + " s. Times are measured by the backend for each call."
+      : "";
   }
 
   function renderQA() {
@@ -415,7 +540,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     $("calls-note").textContent = view.calls;
   }
 
-  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); renderResponders(); }
+  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); renderResponders(); renderStepfunCalls(); }
 
   function addAttempt(d) {
     const ul = $("attempts");
@@ -483,16 +608,22 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     view = blank();
     view.state = d.state;
     view.incidentId = d.incident_id;
+    // Otherwise the first live line of this incident would wipe rows added before it.
+    convo.forIncident(d.incident_id);
     if (d.incident_id) {
       view.openedAt = d.opened_at_ms || Date.now();
       view.answers = (d.transcript || []).map((x) => x.a);
       view.answered = d.answered || [];
       view.triage = d.triage || null;
+      view.rules = d.rules || null;
+      view.model = d.model || null;
+      view.stepfunCalls = d.stepfun_calls || [];
       view.asking = d.current_question || null;
       view.companionReady = !!d.companion_ready;
       for (const r of d.responders || []) view.responders[r.number] = r;
     }
     pi.setAvailable(!!d.pi_stt);
+    if (d.stepfun) stepfunConfig = d.stepfun;
     // Page reloaded after the script finished: pick the companion back up.
     if (view.companionReady) companion.start(d.incident_id);
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
@@ -504,7 +635,9 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         if (d.snapshot) { onSnapshot(d); break; }
         if (d.state === "IDLE") {
           companion.stop();
+          const calls = view.stepfunCalls;
           view = blank();
+          view.stepfunCalls = calls;  // the last incident's call log stays readable until the next one
           log("Back to IDLE");
           break;
         }
@@ -519,13 +652,27 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         view.state = d.state; view.reason = d.reason || "";
         log(`${d.prev || ""}${d.prev ? " → " : ""}${d.state}${d.reason ? " · " + d.reason : ""}`);
         break;
-      case "triage_update":
+      case "triage_update": {
+        const before = view.answers.length;
         view.triage = d.triage;
+        view.rules = d.rules || null;
+        view.model = d.model || null;
         view.answers = d.transcript || [];
         view.answered = d.answered || [];
         view.asking = d.current_question || null;
-        log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
+        // A finished model call re-sends the record with no new answer.
+        if (view.answers.length > before) log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
         break;
+      }
+      case "stepfun_call": {
+        if (d.incident_id && view.incidentId && d.incident_id !== view.incidentId) break;
+        view.stepfunCalls.push(d);
+        if (view.stepfunCalls.length > 30) view.stepfunCalls.shift();
+        view.lastCall[d.kind] = d;
+        const r = stepfunView.callRow(d);
+        log("StepFun " + r.what + " · " + (d.outcome === "ok" ? "ok" : r.note));
+        break;
+      }
       case "message_out":
         if (d.delivered === false) log("Text NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". An alert goes out when they text the line.");
         else if (d.kind === "alert") log("Alert queued for " + (d.to || []).join(", "));
@@ -539,8 +686,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         break;
       case "message_in":
         if (d.sender && !view.responders[d.sender]) view.responders[d.sender] = { number: d.sender, status: "acknowledged" };
-        convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”",
-          d.question ? "question, answered by text" : d.spoken ? "read aloud as one calm sentence" : "read aloud from a fixed template");
+        {
+          // The StepFun call that handled this text ran just before it was emitted.
+          const call = d.question ? view.lastCall.answer : d.spoken ? view.lastCall.rewrite : null;
+          convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”", stepfunView.messageNote(d, call));
+          view.lastCall = {};
+        }
         log("Caregiver " + d.sender + ": “" + d.text + "”" + (d.question ? " (question, answered by text)" : d.spoken ? " (read aloud)" : ""));
         if (d.spoken) companion.tell(`Caregiver message, already read aloud to her: "${d.spoken}"`);
         break;

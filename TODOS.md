@@ -53,7 +53,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [x] (C/D · Droid) Enable the post-script companion and refine both saved agent prompts (`docs/voice-prompts.md`). Verified: 432 backend tests, 7 frontend tests, stub fall-to-unlock, browser off/retry state, SDK import, and private-agent token minting. Live backend restarted with companion enabled.
 - [ ] (C/D) Live AirPods companion and selective Photon relay after all five questions. Blocked at the latest check by absent Pi heartbeats; no real test call or text placed during companion enablement.
 - [ ] (A+B) `STUB_EDGE=0`: signed events + verified commands; wrong secret rejected
-- [ ] (B) `STUB_STEPFUN=0`, latency logged
+- [x] (B) `STUB_STEPFUN=0`, latency logged (Droid, Oct 18: every call logs `stepfun call=<kind> model=step-5-preview ms=<n> ok=<bool>` and reaches the dashboard as `stepfun_call`)
 - [x] (C · Droid) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock: stock voice, 6 fixed phrases cached on the port-8002 test backend (`edge/box3-voice`); played live through three knock runs on the real Pi
 - [x] (A · Droid) QNX AI module (#22, `edge/box3-voice`): `whisper.cpp` on the Pi transcribes the person's answers (laptop mic → signed clip fetch → `speech_text`). Live AirPods runs: help path and "I'm fine" cancel. tiny.en: whisper 1.16-1.55 s per clip, upload to answer applied 1.6-2.4 s; base.en (demo model, more accurate): 2.7-3.1 s and 3.8-4.3 s
 - [ ] (A) Live check of an all-silent recording with Pi speech-to-text (unit-tested only)
@@ -150,6 +150,11 @@ Stack with every stub off (`STUB_*=0`, real Sentry) on spare ports; the Pi-side 
 - [ ] (B) Only one incident at a time across devices: a second device's fall is ignored while another device's incident is open, and that node then alarms with no backend incident. Fine for the one-box demo; note it in the pitch
 - [ ] (A) `edge/link.py` drops a message already received when the peer closes the socket; delivery stays at-least-once (the backend dedupes), but the uplink could hand over cleanly
 - [x] (C) Photon filters inbound texts that look like one-time codes (`listFilteredVerificationCodes`): a real `UNLOCK 1234` reply from a phone is still to be tried through the live line. **Oct 18:** a real `UNLOCK 4101` from the phone was not filtered by Photon; the backend refused it correctly because the 600 s unlock window had passed
+
+## Issue #24 (branch `dashboard/stepfun-visible`)
+
+- [x] (D · Droid) Make StepFun visible: the Triage panel shows Rules, step-5-preview and the record in use side by side (model fields it added marked "+ model", answers the rules kept crossed out), a badge with the call's measured latency, "model: pending…" while it runs, or "fallback: rules (timeout 45 s)" / the rejection reason. A StepFun calls panel logs every triage, reply rewrite and caregiver Q&A call with ms and outcome; caregiver rows say whether the rewrite was used or fell back. Checked with pytest, `node --test`, and a headless browser against a fake StepFun server, then against live step-5-preview Oct 18 (:8041, `STUB_STEPFUN=0`): `model.status` went waiting → pending → ok (12.9 s, deadline 45 s, 5 answers); the model returned `null` for two hedged answers the rules read ("I think I hit my head a little", "Not really"), so the rules record stayed and both records show the gap; `stepfun_call` events arrived for rewrite (6.6 s), triage (8.9 s) and Q&A (8.0 s), all `ok`; the first WebSocket snapshot carried `stepfun.deadlines_s` 45/10/12
+- [ ] (B/D) Let the operator correct a misread triage field: no backend endpoint can carry it yet (`/person/answer` only appends the next answer)
 
 ## Proposed
 

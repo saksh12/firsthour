@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .calls import VoiceCalls, companion_token, parse_postcall, verify_postcall_signature
 from .coordinator import parse_names, parse_order
 from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
-from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
+from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage, StepFunCall
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
 from .telemetry import ENVIRONMENT, Telemetry
@@ -163,6 +163,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     undelivered: dict[str, tuple[str, str]] = {}
     # Recorded answers waiting for the Pi (clip id = its transcribe command id). Memory only.
     clips: dict[str, dict] = {}
+    # Recent StepFun calls, so a dashboard that reconnects mid-incident still has its call log.
+    stepfun_calls: deque = deque(maxlen=30)
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
@@ -198,6 +200,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # A stuck dashboard tab must never slow the incident flow; drop it.
             clients.discard(q)
             log.warning("dashboard client dropped, queue full")
+
+    def stepfun_call(call: StepFunCall) -> None:
+        call.incident_id = current_incident_id()
+        data = call.model_dump()
+        stepfun_calls.append(data)
+        emit("stepfun_call", data)
 
     def speak(text: str) -> None:
         spoken.append(text)
@@ -400,6 +408,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         timeout_s=s.get("STEPFUN_REWRITE_TIMEOUT_S", 10.0), answer_timeout_s=s.get("STEPFUN_ANSWER_TIMEOUT_S", 12.0),
         span=lambda op, **kw: telemetry.span(current_incident_id(), op, **kw),
         **({"transport": s["STEPFUN_TRANSPORT"]} if "STEPFUN_TRANSPORT" in s else {}),  # tests only
+        on_call=stepfun_call,
     )
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
     voice = Voice(
@@ -432,7 +441,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                               playback_grace_s=PLAYBACK_GRACE_S,
                               emit=emit, on_close=on_close, speak=speak,
                               send_alert=send_alert,
-                              triage_fn=stepfun.triage,
+                              triage_fn=stepfun.triage_detail,
+                              model=stepfun.model if stepfun.enabled else None,
                               rewrite_fn=stepfun.rewrite,
                               send_text=send_text, place_call=place_call, answer_fn=stepfun.answer,
                               call_order=parse_order(s["CAREGIVER_NUMBERS"]) or None, names=names,
@@ -794,8 +804,15 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         clients.add(q)
         log.info("dashboard connected clients=%d", len(clients))
         try:
-            await ws.send_json({"type": "incident_update",
-                                "data": {"snapshot": True, "pi_stt": s["PI_STT"], **machine.snapshot()}})
+            snap = machine.snapshot()
+            await ws.send_json({"type": "incident_update", "data": {
+                "snapshot": True, "pi_stt": s["PI_STT"], **snap,
+                "stepfun": {"model": stepfun.model, "enabled": stepfun.enabled,
+                            "deadlines_s": {"triage": stepfun.triage_timeout_s, "rewrite": stepfun.timeout_s,
+                                            "answer": stepfun.answer_timeout_s}},
+                "stepfun_calls": [c for c in stepfun_calls
+                                  if snap["incident_id"] and c["incident_id"] == snap["incident_id"]],
+            }})
             while q in clients:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=1.0)

@@ -333,6 +333,12 @@ The signature covers the whole body, so a captured reply can be resent inside th
 
 `incident_update`, `triage_update` (with `answered`: the question keys she said something to, so an empty field shows as unclear rather than unsaid), `message_in`, `message_out`, `unlock_attempt` (with result and reason), `device_status`, `question_played` (a question finished playing; the Pi STT recorder starts on it), `speech_heard {clip_id, text, stt_ms, audio_ms, round_trip_ms, error}` (the Pi's transcript), `voice_line {text, status: playing|played}` (what the laptop voice is saying), `script_done {incident_id}` (the five questions and closing audio are over; the dashboard starts the companion agent, 6.9). Snapshots carry `companion_ready` for reconnects; the first snapshot also carries `pi_stt` (true when `PI_STT=1`). From issue #23: `delivery_status` (`queued` → `sent` = Photon API accepted → `acknowledged` = caregiver replied → `responder_assigned`; `blocked`/`failed` on errors; no delivered/read), `responder_update` (`accepted` | `arriving` + `eta_min` | `arrived`, `assigned` for the first claim), `call_update` (`dialing` | `placed` | `failed` | `completed` + summary).
 
+From issue #24 (StepFun visible on the dashboard; pydantic `StepFunCall` and `StepFunTriageView` in `backend/app/models.py`):
+
+- `stepfun_call {kind, model, ms, outcome, fallback, reason, deadline_s, incident_id}`: one per step-5-preview call. `kind` is `triage` | `rewrite` | `answer`. `outcome` is `ok` | `timeout` (the deadline fired) | `invalid` (bad JSON, a record that failed validation, a rewrite or answer that broke a rule) | `error` (HTTP or network). `fallback` names what was used instead (`rules`, `original text`, `template`), null on `ok`. `ms` is the backend's own timing of the call. Never carries the prompt, the reply text or a phone number.
+- `triage_update` and every snapshot also carry `rules` (the rules record for the same answers) and `model`: `name` (null when rules only), `status` (`off` = rules only, `waiting` = no answer yet, `pending` = a call is running, else the last finished call's outcome), `ms`, `deadline_s`, `reason`, `record` (the model's own fields and summary, null until a valid one arrives), `answers_seen`, `added` (fields of the record in use that differ from the rules, plus `summary` when the model's own summary is used) and `overruled` (fields where the model said something the record in use does not). A finished call sends a `triage_update` even when the record is unchanged.
+- The WebSocket's first snapshot carries `stepfun {model, enabled, deadlines_s {triage, rewrite, answer}}` and `stepfun_calls` (the open incident's recent calls).
+
 ### 6.8 Speech-to-text on the Pi (QNX AI module: whisper.cpp)
 
 On only with `PI_STT=1` on the backend and `WHISPER_MODEL` set on the Pi. The microphone is on the laptop (AirPods in the demo; the USB webcam mic failed in QNX `io-snd`). Whisper runs on the Pi, so the person's answer is understood by the safety node, not the cloud.
@@ -761,6 +767,8 @@ The person can stop at any point. The backend sends the alert after question 1 i
 
 ### 11.3 Call (`backend/app/triage.py`)
 
+Plan-time sketch. The real code uses stdlib `urllib` (no SDK), `max_tokens=5000` because reasoning counts against it, and a 45 s deadline (11.4).
+
 ```python
 import os, json
 from openai import OpenAI
@@ -782,8 +790,8 @@ def parse_answers(transcript: str, profile: dict) -> dict:
                   {"role": "user", "content": transcript}],
         response_format={"type": "json_object"},
         temperature=0.1,
-        max_tokens=300,
-        timeout=15,                 # background only: the rule-based record already escalated
+        max_tokens=5000,
+        timeout=45,                 # background only: the rule-based record already escalated
         reasoning_effort="low",     # documented for step-5-preview
     )
     data = json.loads(resp.choices[0].message.content)
@@ -793,7 +801,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.4 Safety rails
 
-- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **15-second timeout** (measured 5-13 s); on timeout or bad JSON the rule record stays. The demo never waits on the model.
+- **Rules first, model second.** Every answer is parsed by the rules instantly; that record drives escalation and the alert. StepFun refines it in the background with a **45-second timeout** (measured 5-38 s on `low`; 8.9-12.9 s in the Oct 18 morning live check); on timeout or bad JSON the rule record stays. The demo never waits on the model. The dashboard shows the rules record, the model's own record and the record in use side by side, and logs every call with its latency and outcome (`stepfun_call`), so the operator can see what the model added, what the rules kept, and when it fell back.
 - **Validate the output** with a pydantic model before using it.
 - **The medication list comes from the profile**, entered by a caregiver, not from the model.
 - **Show the raw transcript** next to the record on the dashboard. Users can see and correct what the AI understood. StepFun's judges look for reliability and for users understanding and controlling the workflow.
@@ -801,7 +809,7 @@ def parse_answers(transcript: str, profile: dict) -> dict:
 
 ### 11.5 Caregiver reply rewrite
 
-Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line stops `step-5-preview` from reasoning first (measured 1-1.8 s instead of 6-12 s). **3-second timeout**; fall back to reading the original if the call fails.
+Prompt: "Rewrite this message as one calm, short sentence (max 20 words) to be read aloud to someone who has fallen. Do not add information. Answer immediately. Do not think step by step." The last line was meant to stop `step-5-preview` from reasoning first (measured 1-1.8 s Oct 17); by Oct 18 the model reasoned 800-1200 tokens regardless and took 6-12 s (6.6 s in the live check), and there is no off switch. **10-second timeout** (`STEPFUN_REWRITE_TIMEOUT_S`); fall back to reading the original if the call fails. A caregiver question goes through the same pool with a **12-second timeout** (`STEPFUN_ANSWER_TIMEOUT_S`, measured 7.4-8.0 s), then the templated status; it is texted, so it can wait longer than speech.
 
 ---
 

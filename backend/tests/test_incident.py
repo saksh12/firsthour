@@ -424,3 +424,39 @@ def test_a_refinement_overtaken_by_new_answers_still_counts(clock, rec):
     assert t["head_strike"] is True                          # the newer answer, from the rules
     assert t["can_move"] is None and t["bleeding"] is None   # never a reassurance nobody heard
     assert "model saw" not in t["summary"]                   # its summary predates the new answer
+
+
+def test_dashboard_sees_the_model_pending_then_its_outcome(clock, rec):
+    """Issue #24: the operator sees "pending" while step-5-preview runs, then how it ended."""
+    import threading
+
+    from app.triage import TriageOutcome
+
+    gate = threading.Event()
+
+    def slow(answers, profile):
+        gate.wait(5)
+        return TriageOutcome(parse_rules(answers, profile), "timeout", ms=45000, deadline_s=45.0, reason="timeout")
+
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    m = IncidentMachine(guard, DEMO_PROFILE, clock=clock, emit=rec.emit, speak=rec.spoken.append,
+                        triage_fn=slow, model="step-5-preview")
+    m.on_fall("bath-01", "inc-1")
+    assert m.snapshot()["model"]["status"] == "waiting"
+    m.on_answer("help")
+    assert m.snapshot()["model"]["status"] == "pending"
+    gate.set()
+    for _ in range(200):
+        if m.snapshot()["model"]["status"] != "pending":
+            break
+        time.sleep(0.01)
+    last = [d for t, d in rec.events if t == "triage_update"][-1]
+    assert last["model"]["status"] == "timeout" and last["model"]["ms"] == 45000
+    assert last["model"]["record"] is None and last["triage"] == last["rules"]
+
+
+def test_rules_only_machine_sends_one_triage_update_per_answer(m, rec):
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("help")
+    updates = [d for t, d in rec.events if t == "triage_update"]
+    assert len(updates) == 1 and updates[0]["model"]["status"] == "off"
