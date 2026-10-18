@@ -43,7 +43,7 @@ Last updated Sat Oct 17, 5:25 PM.
 | `dashboard/` | Live incident page: state, clock, triage + transcript, unlock log | ✅ | Door shows the Pi's confirmation |
 | Caregiver simulator | Stand-in phone for the demo | ✅ | `dashboard/caregiver-simulator.html` |
 | `scripts/simulate_fall.py` | Whole story end to end on stubs | ✅ | Passes |
-| `scripts/demo_reset.sh` | One-command reset between runs | ⬜ | |
+| `scripts/demo_reset.sh` | One-command reset between runs | ✅ | Backend to IDLE + signed `reset` to the Pi; 3 back-to-back `simulate_fall.py` runs pass |
 | Calibration | Thresholds from ~20 trials per action | ⬜ | Tool in review (#15); placeholder numbers in `edge/config.py` |
 | Handoff sheet page | Paramedic summary | ⬜ | |
 | Docs | `docs/sentry-story.md` started; demo script, Devpost draft | 🔶 / ⬜ | |

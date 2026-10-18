@@ -56,7 +56,7 @@ There is no servo motor, so the door latch is simulated, and the security chain 
 1. The backend grants an unlock and queues a **signed** `unlock` command (all unlock rules below).
 2. The Pi verifies it (signature, freshness, nonce, **its own** open incident) and sends `U` to the Arduino.
 3. The Arduino "opens the latch": it lights the latch LED (if wired), answers `ACK,U` and relocks itself after `UNLOCK_HOLD_SECONDS`.
-4. The Pi reports `local_unlock` to the backend, and **the Mac shows the door opening** (dashboard door panel).
+4. On `ACK,U` the Pi reports `local_unlock` to the backend, and **the Mac shows the door opening** (dashboard door panel). No ACK within `UNLOCK_ACK_TIMEOUT_S`: the Pi reports `unlock_failed` and the door panel says so.
 
 The Mac only ever shows what the Pi reports, never the backend's grant: until the Pi confirms, the dashboard says "Unlocking…". Never fake the opening on the Mac from the grant alone.
 
@@ -182,6 +182,8 @@ Offline, nothing unlocks the door: it stays locked until the backend is reachabl
 - Fusion: suspected fall when sound peak and accelerometer delta both cross their thresholds within `WINDOW_MS = 400`.
 - 30-second cooldown after each event, so one fall can't trigger twice.
 - **Thresholds come from calibration data**, not guesses: ~20 trials each of `fall_beanbag`, `sit_mat`, `bottle_drop`, `door_slam`, `footsteps`, `clap`, logged to CSV with labels. Commit the final numbers in `edge/config.py`. Recheck in the demo room.
+- The local incident and alarm have no timeout: they stay up until a signed `alarm_off` (a clear "I'm fine", a resolve) or a demo `reset`. Only unlocks expire with the window.
+- HTTP runs on its own thread; the sensor loop never waits on the network.
 - On `fall_suspected` the Pi, **before any network call**: opens a local incident, starts the clock, turns the buzzer on, shows `TIME DOWN mm:ss`. Then it tries to POST. Unreachable backend → keep going locally, log to file, replay when the network returns.
 
 ## Latency (measure everything in Sentry; quote only measured numbers)
