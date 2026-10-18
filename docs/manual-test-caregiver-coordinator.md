@@ -61,16 +61,23 @@ Needs `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID` 
 Photon SIP number), `ELEVENLABS_WEBHOOK_SECRET` and `VOICE_TOOL_TOKEN` in `.env`. Rotate the
 Photon outbound SIP password first (TODOS.md).
 
-1. Tunnel the backend: `cloudflared tunnel --url $B`. Only `/health`, `/voice/postcall` and `/voice/incident` answer through it; check `curl https://<tunnel>/incident` is 404.
-2. In the ElevenLabs agent: post-call webhook (transcription) → `https://<tunnel>/voice/postcall` with the HMAC secret; a webhook tool `GET https://<tunnel>/voice/incident` with header `Authorization: Bearer <VOICE_TOOL_TOKEN>`. Prompt uses `{{patient_name}}`, `{{room}}`, `{{time_down}}`, `{{triage_summary}}`, `{{on_blood_thinner}}`, `{{last_answer}}`, `{{eta_question}}`, and says the door can only be opened by texting the code.
+1. Point ElevenLabs at this backend: `python3 scripts/voice_tunnel_setup.py --tunnel --write-env --backend $B`.
+   It starts `cloudflared`, creates the post-call webhook on the new hostname (retries on), makes it
+   the workspace's post-call webhook, repoints the agent's `get_incident` tool, writes the new
+   `ELEVENLABS_WEBHOOK_SECRET` to `.env` and checks the three tunneled routes. Restart the backend
+   after it. A quick tunnel gets a new hostname every start, so run it again after every restart of
+   the tunnel. Only `/health`, `/voice/postcall` and `/voice/incident` answer through it;
+   `curl https://<tunnel>/incident` is 404.
+2. The agent's prompt uses `{{patient_name}}`, `{{room}}`, `{{time_down}}`, `{{triage_summary}}`, `{{on_blood_thinner}}`, `{{last_answer}}`, `{{eta_question}}`, and says the door can only be opened by texting the code. Its `get_incident` tool keeps its bearer token in the ElevenLabs secret store, so `VOICE_TOOL_TOKEN` must be that same value.
 3. Start an incident and don't text. After 20 s phone A rings. The agent knows the triage summary and time down and asks for an ETA. Say "I'll be there in 5 minutes". Also say "unlock the door".
-4. Expect: the agent refuses to unlock and tells you to text the code; the door stays locked. After hang-up (webhook): log `Voice call completed`, box says "Sarah is about 5 minutes away.", phone A gets "You said 5 minutes on the call. We told them. At the front door, reply UNLOCK <code>."
+4. Expect: the agent refuses to unlock and tells you to text the code; the door stays locked. After hang-up: log `post-call result source=webhook` (or `source=poll` within about 10 s if the tunnel dropped the webhook), box says "Sarah is about 5 minutes away.", phone A gets "You said 5 minutes on the call. We told them. At the front door, reply UNLOCK <code>."
 5. Phone A texts `UNLOCK <code>`: latch opens only after the Pi confirms.
 
-TODO(verify) on this first real call: the `ElevenLabs-Signature` format (`t=…,v0=…`) and
-that `conversation_id` in the outbound response matches the webhook's. If the webhook returns
-401, check the secret first.
-
+Checked on real calls Oct 18 (backend-placed, 04:24 and 04:58): the `ElevenLabs-Signature` format
+(`t=…,v0=…`) verifies and `conversation_id` in the outbound response matches the webhook's and the
+conversation lookup. The 04:58 call's webhook was lost to a flapping quick tunnel (ElevenLabs saw
+an HTTP 500, retries were off); the backend now also polls the finished conversation, so the ETA
+reaches the thread without the tunnel. If the webhook returns 401, check the secret first.
 ## Reset
 
 `BACKEND_URL=$B bash scripts/demo_reset.sh` (connect.md section 5). Pi shows `READY`,

@@ -476,3 +476,107 @@ def test_rules_only_app_says_so_and_reports_no_calls():
     assert snap["model"]["status"] == "off" and snap["model"]["name"] is None and snap["model"]["record"] is None
     assert snap["rules"] == snap["triage"]
     assert not [e for e in c.app.state.events if e.type == "stepfun_call"]
+
+
+# --- Sentry AI Agents span attributes ------------------------------------------------------
+
+class Spans:
+    """A fake span hook: records what StepFun would put on Sentry spans."""
+
+    def __init__(self):
+        self.made = []
+
+    def __call__(self, op, name=None, parent=None, **data):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def cm():
+            span = FakeSpan(op, name or op, parent, data)
+            self.made.append(span)
+            try:
+                yield span
+            except Exception:
+                span.status = span.status or "internal_error"
+                raise
+        return cm()
+
+    def op(self, op):
+        return [s for s in self.made if s.op == op]
+
+
+class FakeSpan:
+    def __init__(self, op, name, parent, data):
+        self.op, self.name, self.parent, self.data, self.status = op, name, parent, dict(data), None
+
+    def set_data(self, k, v):
+        self.data[k] = v
+
+    def set_status(self, status):
+        self.status = status
+
+
+USAGE = {"prompt_tokens": 180, "completion_tokens": 1200, "total_tokens": 1380,
+         "completion_tokens_details": {"reasoning_tokens": 1150}}
+
+
+def with_usage(content):
+    text = content if isinstance(content, str) else json.dumps(content)
+    return {"model": "step-5-preview", "usage": USAGE,
+            "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+
+
+def test_every_call_is_a_gen_ai_chat_span_under_its_stage():
+    spans = Spans()
+    s = sf(FakeTransport(raw=with_usage(GOOD)), span=spans)
+    s.triage(ANSWERS, DEMO_PROFILE)
+    sf(FakeTransport(raw=with_usage("Help is coming.")), span=spans).rewrite("omw")
+    sf(FakeTransport(raw=with_usage({"kind": "answer", "answer": "She is awake."})), span=spans).answer(
+        "Is she awake?", {"patient": "Margaret", "pronoun": "she", "time_down": "1 min 05 s",
+                          "triage_summary": "Conscious.", "last_answer": "Yes", "responders": []})
+    chats = spans.op("gen_ai.chat")
+    assert [c.parent.op for c in chats] == ["stepfun_triage", "stepfun_rewrite", "stepfun_answer"]
+    for c in chats:
+        assert c.name == "chat step-5-preview"
+        assert c.data["gen_ai.operation.name"] == "chat"
+        assert c.data["gen_ai.provider.name"] == "stepfun"
+        assert c.data["gen_ai.request.model"] == "step-5-preview"
+        assert c.data["gen_ai.response.model"] == "step-5-preview"
+        assert c.data["gen_ai.usage.input_tokens"] == 180
+        assert c.data["gen_ai.usage.output_tokens"] == 1200
+        assert c.data["gen_ai.usage.total_tokens"] == 1380
+        assert c.data["gen_ai.usage.output_tokens.reasoning"] == 1150
+        assert c.data["gen_ai.response.finish_reasons"] == '["stop"]'
+        assert c.status is None
+    assert spans.op("stepfun_triage")[0].data["result"] == "model"
+
+
+def test_gen_ai_spans_never_carry_the_prompt_or_the_answer():
+    spans = Spans()
+    sf(FakeTransport(raw=with_usage(GOOD)), span=spans).triage(ANSWERS, DEMO_PROFILE)
+    sf(FakeTransport(raw=with_usage("Your daughter is close.")), span=spans).rewrite("almost there mom")
+    dumped = json.dumps([s.data for s in spans.made])
+    for private in ("right hip", "Help, I slipped", "almost there", "daughter", GOOD["summary"]):
+        assert private not in dumped, private
+
+
+def test_missing_usage_is_left_out_not_guessed():
+    spans = Spans()
+    sf(FakeTransport(GOOD), span=spans).triage(ANSWERS, DEMO_PROFILE)
+    chat = spans.op("gen_ai.chat")[0]
+    assert not any(k.startswith("gen_ai.usage") for k in chat.data)
+    assert "gen_ai.response.model" not in chat.data
+
+
+def test_timeout_and_fallback_are_visible_on_the_spans():
+    spans = Spans()
+    sf(FakeTransport(GOOD, delay=1.0), span=spans, triage_timeout_s=0.1).triage(ANSWERS, DEMO_PROFILE)
+    assert spans.op("gen_ai.chat")[0].status == "deadline_exceeded"
+    stage = spans.op("stepfun_triage")[0]
+    assert stage.data["result"] == "fallback" and stage.data["fallback_reason"] == "timeout"
+
+
+def test_stub_mode_still_marks_the_triage_stage_but_makes_no_model_span():
+    spans = Spans()
+    sf(FakeTransport(GOOD), span=spans, stub=True).triage(ANSWERS, DEMO_PROFILE)
+    assert [s.op for s in spans.made] == ["stepfun_triage"]
+    assert spans.made[0].data == {"result": "rules", "fallback_reason": "model off"}

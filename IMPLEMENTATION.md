@@ -819,10 +819,11 @@ The challenge wants **at least two products beyond error monitoring** and a stor
 
 | Product | How we use it |
 | --- | --- |
-| **Tracing** | One trace per incident, with a span for each stage: `sensor_event`, `voice_check`, `speech_to_text`, `stepfun_triage`, `photon_send`, `unlock_decision`, `command_to_pi`. We read the real durations and fix the slowest one. |
+| **Tracing** | One trace per incident, with a span for each stage: `sensor_event`, `voice_check`, `speech_to_text`, `stepfun_triage` (+ `stepfun_rewrite`, `stepfun_answer`), `photon_send`, `unlock_decision`, `command_to_pi` (queued → picked up), `unlock_to_latch` (grant → the Pi's `local_unlock` / `unlock_failed`). We read the real durations and fix the slowest one. |
+| **AI Agent Monitoring** | Each StepFun call is a `gen_ai.chat` span with the `gen_ai.*` model and token-usage attributes Sentry's AI Agents views read. No prompt or completion text. |
 | **Uptime Monitoring** | Monitor a public `/health` URL (through a tunnel). `/health` returns **503 if the Pi has not sent a heartbeat in 30 seconds**, so the monitor really reflects whether the box is alive. |
 | **Logs** | Structured logs for every unlock attempt (with reason), every triage Q and A, every state change. This is the audit trail. |
-| **Session Replay** (optional) | On the dashboard if the JS SDK is easy to add. |
+| **Session Replay** | On the dashboard: the CDN browser SDK with all text and inputs masked and media blocked. The page gets the DSN from the backend's `GET /config/public` (DSN and environment only; 404 through the tunnel). |
 
 **Do this as you go:**
 

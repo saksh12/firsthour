@@ -2,12 +2,19 @@
 
 Products used beyond error monitoring:
 - Tracing: one trace per incident ("fall_incident"), with a span per stage:
-  sensor_event, voice_check, stepfun_triage, photon_send, unlock_decision, command_to_pi.
-  (speech_to_text gets a span once STT is wired; nothing to time yet.)
+  sensor_event, voice_check, speech_to_text, stepfun_triage, photon_send, unlock_decision,
+  command_to_pi (queued -> picked up by the Pi's poll) and unlock_to_latch (unlock granted ->
+  the Pi reports local_unlock or unlock_failed). A span still open when the incident closes
+  ends with status "cancelled" and says so, instead of looking like a success.
+- AI Agents: every StepFun HTTP call is a "gen_ai.chat" child span of its stage span
+  (stepfun_triage, stepfun_rewrite, stepfun_answer) with the gen_ai.* attributes the AI
+  Agents dashboards read (model, token usage). Never the prompt or the completion text.
 - Logs: every `logging` record at INFO+ (state changes, unlock attempts with reasons,
   StepFun latency) is sent as a Sentry log.
 - Uptime Monitoring: point a monitor at the tunneled GET/HEAD /health, which is 503
   when the Pi hasn't sent a heartbeat in 30 s (STUB_EDGE=0).
+- Session Replay: the dashboard loads the browser SDK itself (GET /config/public gives it
+  the DSN), with all text masked and media blocked.
 
 No DSN = every method is a cheap no-op. Privacy: send_default_pii=False, request
 bodies are never attached (a caregiver's reply can contain the unlock code), a
@@ -21,7 +28,7 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
@@ -32,6 +39,7 @@ log = logging.getLogger("firsthour.telemetry")
 UNTRACED_PATHS = {"/health", "/edge/commands", "/edge/event"}
 _CODE = re.compile(r"\bUNLOCK\s+\d{4}\b", re.IGNORECASE)
 _PHONE = re.compile(r"\+\d{6,14}(\d{4})\b")
+ENVIRONMENT = "hackathon"
 
 
 def _redact(text: str) -> str:
@@ -79,7 +87,7 @@ class Telemetry:
         self._open: dict[tuple, Any] = {}    # (incident_id, key) -> Span
 
     @classmethod
-    def init(cls, dsn: str, environment: str = "hackathon", transport: Any = None) -> "Telemetry":
+    def init(cls, dsn: str, environment: str = ENVIRONMENT, transport: Any = None) -> "Telemetry":
         if not dsn:
             log.info("sentry disabled (no SENTRY_DSN)")
             return cls(False)
@@ -121,7 +129,11 @@ class Telemetry:
             return
         with self._lock:
             for key in [k for k in self._open if k[0] == incident_id]:
-                self._open.pop(key).finish()
+                span = self._open.pop(key)
+                # e.g. an unlock the Pi never confirmed: the trace must not show it as done.
+                span.set_status("cancelled")
+                span.set_data("ended_by", f"incident {final_state}")
+                span.finish()
             tx = self._tx.pop(incident_id, None)
         if tx is not None:
             tx.set_tag("final_state", final_state)
@@ -141,7 +153,7 @@ class Telemetry:
                 span.set_data(k, v)
             self._open[(incident_id, key)] = span
 
-    def finish(self, incident_id: Optional[str], key: str, **data: Any) -> None:
+    def finish(self, incident_id: Optional[str], key: str, status: str = "ok", **data: Any) -> None:
         if not self.enabled or not incident_id:
             return
         with self._lock:
@@ -149,11 +161,14 @@ class Telemetry:
         if span is not None:
             for k, v in data.items():
                 span.set_data(k, v)
+            span.set_status(status)
             span.finish()
 
     @contextmanager
-    def span(self, incident_id: Optional[str], op: str, **data: Any):
-        """Time a block as a child span of the incident's trace."""
+    def span(self, incident_id: Optional[str], op: str, *, name: Optional[str] = None,
+             parent: Any = None, **data: Any):
+        """Time a block as a child span of the incident's trace, or of `parent` (a span this
+        method yielded earlier). Yields the span, or None when there is nothing to trace."""
         if not self.enabled or not incident_id:
             yield None
             return
@@ -162,23 +177,17 @@ class Telemetry:
         if tx is None:
             yield None
             return
-        span = tx.start_child(op=op, name=op)
+        span = (parent or tx).start_child(op=op, name=name or op)
         for k, v in data.items():
             span.set_data(k, v)
         try:
             yield span
         except Exception:
-            span.set_status("internal_error")
+            if span.status is None:  # keep a more precise status set inside the block
+                span.set_status("internal_error")
             raise
         finally:
             span.finish()
-
-    def wrap(self, op: str, fn: Callable, incident_id: Callable[[], Optional[str]]) -> Callable:
-        """Wrap a stage function so each call becomes a span on the current incident."""
-        def wrapped(*args, **kwargs):
-            with self.span(incident_id(), op):
-                return fn(*args, **kwargs)
-        return wrapped
 
     # --- the dashboard event stream drives the rest ---------------------------------
 
