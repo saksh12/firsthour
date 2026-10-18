@@ -7,7 +7,7 @@ on the floor (answers), a stranger, and the caregiver (reading the stub inbox, r
 Needs the backend running with STUB_PHOTON=1:
     cd backend && .venv/bin/uvicorn app.main:app --port 8000
     python3 scripts/simulate_fall.py            # person asks for help
-    python3 scripts/simulate_fall.py --silent   # person says nothing; escalates after 8 s
+    python3 scripts/simulate_fall.py --silent   # person says nothing; escalates 8 s after question 1 plays
     python3 scripts/simulate_fall.py --fine     # person says "I'm fine"; incident cancels
 
 Stdlib only, so it also runs on the Pi.
@@ -143,12 +143,16 @@ def run(api: Api, args, secret: str, caregiver: str) -> None:
 
     if args.silent:
         step("Person says nothing; waiting for the 8 s silence escalation")
-        for _ in range(40):
+        # The 8 s start once question 1 has finished playing, so with sound on this takes
+        # 8 s plus the time to speak the assistant line and the question (up to a 12 s grace).
+        t0 = time.monotonic()
+        for _ in range(100):
             time.sleep(0.25)
             _, snap = api.call("GET", "/incident")
             if snap["state"] == "ALERTING":
                 break
-        check(snap["state"] == "ALERTING", "silence escalated to ALERTING")
+        check(snap["state"] == "ALERTING",
+              f"silence escalated to ALERTING {time.monotonic() - t0:.1f} s after the fall")
     else:
         step("Person answers the scripted questions")
         for a in ANSWERS:
