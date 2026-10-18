@@ -269,6 +269,15 @@ class IncidentMachine:
             if heard_at is None:
                 heard_at = self._question_asked_at + self.playback_grace_s
             if inc.state == S.CHECKING and now - heard_at >= self.silence_s:
+                if self._question_heard_at is not None:
+                    log.info("silence timer: question finished playing %.1f s after it was queued, "
+                             "then %.1f s of silence before escalating (timer started at playback end) "
+                             "incident_id=%s", self._question_heard_at - self._question_asked_at,
+                             now - self._question_heard_at, inc.id)
+                else:
+                    log.warning("silence timer: voice never reported the question finished; started after "
+                                "the %g s grace, escalating %.1f s after queueing incident_id=%s",
+                                self.playback_grace_s, now - self._question_asked_at, inc.id)
                 inc.question_index = max(inc.question_index, 1)
                 self._escalate(f"no answer for {self.silence_s:g} s")
                 self._ask()
