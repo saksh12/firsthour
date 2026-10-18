@@ -178,3 +178,11 @@ def test_health_is_503_when_pi_silent_and_edge_live():
     assert c.head("/health").status_code == 503
     post_event(c, "heartbeat")
     assert c.get("/health").status_code == 200
+
+
+def test_tests_never_read_the_real_sentry_dsn_from_env():
+    """The module-level app in app.main loads the root .env; a real DSN there used to turn
+    every log.error a test provoked into a Sentry issue email."""
+    from app.main import load_settings
+
+    assert load_settings()["SENTRY_DSN"] == ""

@@ -10,6 +10,7 @@ from app.models import IncidentState as S
 from app.profile import DEMO_PROFILE
 from app.triage import QUESTIONS, parse_rules
 from app.unlock import UnlockGuard
+from app.voice import ASSISTANT_LINE
 from conftest import CAREGIVER, STRANGER
 
 
@@ -50,7 +51,7 @@ def test_starts_idle(m):
 def test_fall_moves_to_checking_and_asks_first_question(m, rec):
     assert m.on_fall("bath-01", "inc-1")
     assert m.state == S.CHECKING
-    assert rec.spoken == [QUESTIONS[0][1]]
+    assert rec.spoken == [ASSISTANT_LINE, QUESTIONS[0][1]]  # says it's an assistant first
     assert rec.alerts == []
 
 
@@ -91,6 +92,38 @@ def test_silence_for_8s_escalates(m, clock, rec):
     assert m.state == S.ALERTING
     assert "No answer yet." in rec.alerts[0]
     assert "Down 00:08" in rec.alerts[0]
+
+
+def grace_machine(clock, rec):
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    return IncidentMachine(guard, DEMO_PROFILE, clock=clock, silence_s=8, playback_grace_s=12,
+                           emit=rec.emit, speak=rec.spoken.append,
+                           send_alert=lambda inc_id, text: rec.alerts.append(text))
+
+
+def test_silence_timer_starts_when_the_question_finished_playing(clock, rec):
+    m = grace_machine(clock, rec)
+    m.on_fall("bath-01", "inc-1")
+    m.line_played(ASSISTANT_LINE)  # not the question: the timer doesn't start
+    clock.advance(3)               # the question takes 3 s to speak
+    m.line_played(QUESTIONS[0][1])
+    clock.advance(7.9)
+    m.tick()
+    assert m.state == S.CHECKING   # she has had 7.9 s since hearing it, not 10.9
+    clock.advance(0.2)
+    m.tick()
+    assert m.state == S.ALERTING
+
+
+def test_silence_still_escalates_if_the_voice_never_reports(clock, rec):
+    m = grace_machine(clock, rec)
+    m.on_fall("bath-01", "inc-1")
+    clock.advance(12 + 7.9)
+    m.tick()
+    assert m.state == S.CHECKING
+    clock.advance(0.2)
+    m.tick()
+    assert m.state == S.ALERTING   # a stuck speaker delays escalation, never stops it
 
 
 def test_help_button_escalates(m):
@@ -134,7 +167,7 @@ def test_later_answers_update_triage_and_walk_the_script(m, rec):
         m.on_answer(a)
     t = m.incident.triage
     assert (t.head_strike, t.pain_location, t.can_move, t.bleeding, t.done) == (False, "right hip", False, False, True)
-    assert rec.spoken == [q for _, q in QUESTIONS]
+    assert rec.spoken == [ASSISTANT_LINE] + [q for _, q in QUESTIONS]
     m.on_answer("extra")  # past the script: ignored, no crash
     assert len(m.incident.answers) == 5
 

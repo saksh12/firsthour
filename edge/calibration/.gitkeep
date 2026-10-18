@@ -1,0 +1,2 @@
+# Calibration CSVs live here (one <label>.csv per label). Commit them: they are
+# the evidence behind the fusion thresholds in edge/config.py.

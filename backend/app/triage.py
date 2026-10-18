@@ -258,8 +258,11 @@ class StepFun:
         self._transport = transport
         # The deadline is enforced here, not by the socket: a slow-trickling server can't hold us.
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="stepfun")
+        # Rewrite is spoken to the person, so it never queues behind 10 s triage calls.
+        self._rewrite_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stepfun-rewrite")
 
-    def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int, timeout_s: float) -> str:
+    def _chat(self, system: str, user: str, *, json_mode: bool, max_tokens: int, timeout_s: float,
+              pool: Optional[ThreadPoolExecutor] = None) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -272,7 +275,7 @@ class StepFun:
         if json_mode:
             body["response_format"] = {"type": "json_object"}  # verified on our key, Oct 17
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        fut = self._pool.submit(self._transport, self.url, headers, body, timeout_s)
+        fut = (pool or self._pool).submit(self._transport, self.url, headers, body, timeout_s)
         try:
             data = fut.result(timeout=timeout_s)
         except FutureTimeout:
@@ -322,7 +325,7 @@ class StepFun:
         t0 = time.monotonic()
         try:
             out = self._chat(REWRITE_SYSTEM, text, json_mode=False, max_tokens=1200,
-                             timeout_s=self.timeout_s).strip().strip('"')
+                             timeout_s=self.timeout_s, pool=self._rewrite_pool).strip().strip('"')
             if not out:
                 raise StepFunError("empty")
             if len(out.split()) > MAX_REWRITE_WORDS:

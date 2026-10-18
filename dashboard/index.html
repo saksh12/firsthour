@@ -419,7 +419,9 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
         break;
       case "message_out":
-        log("Alert sent to " + (d.to || []).join(", "));
+        log(d.delivered === false
+          ? "Alert NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". It goes out when they text the line."
+          : "Alert sent to " + (d.to || []).join(", "));
         break;
       case "message_in":
         log("Caregiver " + d.sender + ": “" + d.text + "” (read aloud)");

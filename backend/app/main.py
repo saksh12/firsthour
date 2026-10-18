@@ -6,10 +6,12 @@ TODO(phase 1, C): voice.py replaces `speak`.
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import threading
 import time
+import urllib.error
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,12 +21,12 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .incident import IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
-from .security import make_command, verify_event, verify_poll
+from .security import ReplayCache, make_command, verify_event, verify_inbound, verify_poll
 from .telemetry import Telemetry
 from .triage import QUESTIONS, StepFun, urllib_transport
 from .unlock import UnlockGuard
@@ -34,6 +36,9 @@ log = logging.getLogger("firsthour.api")
 
 HEARTBEAT_STALE_S = 30
 TICK_S = 0.25
+# Longest we wait for the voice to report the question played before the silence timer
+# starts anyway: the assistant line plus question 1, each up to a 4 s TTS fetch on a cold cache.
+PLAYBACK_GRACE_S = 12
 WS_QUEUE_MAX = 200
 # Added by a tunnel (cloudflared, ngrok) or any proxy. The tunnel connects from 127.0.0.1,
 # so without this check the whole internet would look like the laptop.
@@ -112,9 +117,13 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     events: deque = deque(maxlen=500)
     outbox: list[dict] = []
     spoken: deque = deque(maxlen=100)
+    # Live Photon on a shared line can't text a caregiver who hasn't texted it first (409).
+    # Keep their alert and send it the moment they do.
+    undelivered: dict[str, tuple[str, str]] = {}
 
     clients: set[asyncio.Queue] = set()
     loop_ref: dict = {"loop": None}
+    inbound_replays = ReplayCache()
 
     telemetry = Telemetry.init(s.get("SENTRY_DSN", ""), transport=s.get("SENTRY_TRANSPORT"))
 
@@ -156,7 +165,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     r = urllib_transport(s["COMMS_GATEWAY_URL"].rstrip("/") + "/send", {},
                                          {"to": number, "body": text}, 10)
                     log.info("alert delivered incident_id=%s to=%s id=%s", incident_id, number, r.get("id"))
-                except (OSError, ValueError) as e:  # HTTPError is an OSError
+                except urllib.error.HTTPError as e:
+                    log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
+                    if e.code == 409:
+                        undelivered[number] = (incident_id, text)
+                        emit("message_out", {"to": [number], "incident_id": incident_id, "kind": "alert",
+                                             "delivered": False,
+                                             "reason": "caregiver has not texted the agent line yet"})
+                except (OSError, ValueError) as e:
                     log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
 
     def send_alert(incident_id: str, text: str) -> None:
@@ -181,6 +197,11 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         telemetry.start(incident_id, f"cmd:{cmd.id}", "command_to_pi", action="unlock")
         log.info("command queued action=unlock incident_id=%s device_id=%s id=%s",
                  incident_id, inc.device_id, cmd.id)
+
+    def on_close(inc, final) -> None:
+        voice.flush()  # leftover questions must not play after "I'm fine" or a resolve
+        undelivered.clear()
+        close_on_pi(inc, final)
 
     def close_on_pi(inc, final) -> None:
         q = queues[inc.device_id]
@@ -209,12 +230,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         model=s.get("ELEVENLABS_MODEL") or DEFAULT_VOICE_MODEL,
         base_url=s.get("ELEVENLABS_BASE_URL") or TTS_BASE_URL,
         span=lambda **kw: telemetry.span(current_incident_id(), "voice", **kw),
+        on_played=lambda text: machine.line_played(text),
         **({"transport": s["VOICE_TRANSPORT"], "player": s["VOICE_PLAYER"]}
            if "VOICE_TRANSPORT" in s else {}),  # tests only
     )
     log.info("voice: %s", "ElevenLabs real" if voice.real else "stub (say/log only)")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
-                              emit=emit, on_close=close_on_pi, speak=speak,
+                              playback_grace_s=PLAYBACK_GRACE_S,
+                              emit=emit, on_close=on_close, speak=speak,
                               send_alert=send_alert,
                               triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
                               rewrite_fn=stepfun.rewrite)
@@ -256,6 +279,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
     app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
+    app.state.inbound_replays = inbound_replays
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
@@ -277,7 +301,11 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         if not ok:
             log.warning("edge event rejected reason=%s", reason)
             raise HTTPException(status_code=401, detail=reason)
-        event = EdgeEvent.model_validate_json(raw)
+        try:
+            event = EdgeEvent.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("edge event rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed event")
         last_heartbeat[event.device_id] = time.time()
         if event.type != "heartbeat":
             log.info("edge event type=%s device_id=%s local_incident_id=%s",
@@ -320,18 +348,54 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         return machine.snapshot()
 
     @app.post("/comms/inbound")
-    def comms_inbound(msg: InboundMessage, request: Request):
-        """Caregiver reply from Photon or the simulator page (same endpoint).
+    async def comms_inbound(request: Request):
+        """Caregiver reply from the comms-gateway or the simulator page (same endpoint).
 
-        With real Photon only the gateway may post here, because the sender number is
-        what the allowlist trusts. In stub mode the simulator page is the caregiver."""
-        if s["STUB_PHOTON"]:
+        The gateway signs with X-Signature/X-Timestamp (section 6.6). The
+        dashboard and simulator pages are unsigned, which is only allowed
+        while STUB_PHOTON=1 and only from this laptop; a presented signature
+        is always checked.
+        """
+        raw = await request.body()
+        signature = request.headers.get("X-Signature")
+        if signature is None:
+            if not s["STUB_PHOTON"]:
+                log.warning("inbound rejected reason=missing signature")
+                raise HTTPException(status_code=401, detail="missing signature")
             laptop_only(request)  # the simulator page is the caregiver's phone
         else:
-            auth = request.headers.get("Authorization", "")
-            if not hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
-                log.warning("comms inbound rejected: not from the gateway")
-                raise HTTPException(status_code=401, detail="gateway token required")
+            ok, reason = verify_inbound(secret, raw, signature,
+                                        request.headers.get("X-Timestamp"))
+            if not ok:
+                log.warning("inbound rejected reason=%s", reason)
+                raise HTTPException(status_code=401, detail=reason)
+            # A captured signed reply stays valid inside the freshness window, so
+            # dedupe: the signature covers the whole body, and the gateway's
+            # messageId catches a re-signed copy of the same Photon message.
+            keys = [signature]
+            try:
+                message_id = json.loads(raw).get("messageId")
+            except ValueError:
+                message_id = None
+            if message_id:
+                keys.append(f"mid:{message_id}")
+            now_ms = time.time() * 1000
+            if any(inbound_replays.is_replay(k, now_ms) for k in keys):
+                log.warning("inbound rejected reason=replay")
+                raise HTTPException(status_code=409, detail="replay")
+        try:
+            msg = InboundMessage.model_validate_json(raw)
+        except ValidationError as e:
+            log.warning("inbound rejected reason=malformed errors=%d", e.error_count())
+            raise HTTPException(status_code=422, detail="malformed inbound message")
+        pending = undelivered.pop(msg.sender.strip(), None)
+        if pending and pending[0] == current_incident_id():
+            # ponytail: resends the card as first written (its "Down" time is stale);
+            # rebuild it here if the gap ever gets long.
+            log.info("resending alert now that the caregiver texted incident_id=%s to=%s",
+                     pending[0], msg.sender)
+            threading.Thread(target=deliver, args=(pending[0], [msg.sender.strip()], pending[1]),
+                             daemon=True).start()
         return machine.caregiver_reply(msg.sender, msg.text)
 
     @app.get("/incident")
