@@ -87,6 +87,8 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .tri td.used { font-weight: 600; font-size: 16px; }
 .tri td.overruled { text-decoration: line-through; }
 .tri .from { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--resp); }
+.tri .from.op { color: var(--check); }
+.tri td.fix { cursor: pointer; text-decoration: underline dotted var(--dim); text-underline-offset: 3px; }
 .sf-badge { display: inline-block; margin-top: 2px; font-size: 11px; font-weight: 700; letter-spacing: .02em; padding: 1px 6px; border-radius: 6px; white-space: nowrap; }
 .sf-badge.ok { color: var(--open); background: var(--open-bg); }
 .sf-badge.wait { color: var(--check); background: var(--check-bg); }
@@ -207,7 +209,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         <tbody id="triage"></tbody>
       </table>
       <div class="summary" id="summary"></div>
-      <div class="source" id="triage-source">Structured from her own words. Used = the rules' answer wherever they heard one; the model can only add a head strike, "can't move" or bleeding the rules missed, and name the pain location. Crossed out = the rules kept their answer. Blood thinner comes from her profile, not the AI. — = not stated.</div>
+      <div class="source" id="triage-source">Structured from her own words. Used = the rules' answer wherever they heard one; the model can only add a head strike, "can't move" or bleeding the rules missed, and name the pain location. Crossed out = the rules kept their answer. Blood thinner comes from her profile, not the AI. — = not stated. Click a Used cell to correct it (yes/no cycles Yes, No, Unknown); a correction wins over the rules and the model.</div>
     </div>
 
     <div class="panel">
@@ -301,7 +303,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   function blank() {
     return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null,
              responders: {}, delivery: "", calls: "", companionReady: false,
-             rules: null, model: null, stepfunCalls: [], lastCall: {} };
+             rules: null, model: null, corrections: {}, stepfunCalls: [], lastCall: {} };
   }
 
   // --- StepFun view (pure; dashboard/stepfun.test.cjs runs this block) ------
@@ -347,24 +349,33 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       return v ? ["Yes", "v-yes"] : ["No", "v-no"];
     }
     // One row per field: rules, the model's own answer, and the record in use. An unknown in
-    // the record in use says whether she answered (Unclear) or not (Not said).
-    function rows(used, rules, model, answered) {
-      used = used || {}; rules = rules || used; answered = answered || [];
+    // the record in use says whether she answered (Unclear), not (Not said), or the operator set it (Unknown).
+    // field: what POST /triage/correct takes for the row; null where it can't be corrected.
+    function rows(used, rules, model, answered, corrections) {
+      used = used || {}; rules = rules || used; answered = answered || []; corrections = corrections || {};
       const rec = model && model.record;
       const added = (model && model.added) || [], overruled = (model && model.overruled) || [];
       const out = FIELDS.map(([label, f, key]) => {
+        const corrected = Object.prototype.hasOwnProperty.call(corrections, f);
         let u = show(f, used[f]);
-        if (used[f] == null) u = f === "conscious" ? ["Not yet", "v-unk"] : [answered.includes(key) ? "Unclear" : "Not said", "v-unk"];
+        if (used[f] == null) u = corrected ? ["Unknown", "v-unk"]
+          : f === "conscious" ? ["Not yet", "v-unk"] : [answered.includes(key) ? "Unclear" : "Not said", "v-unk"];
         const m = rec ? show(f, rec[f]) : [model && model.status === "pending" ? "…" : "—", "v-unk"];
-        return { label, rules: show(f, rules[f]), model: m, used: u, added: added.includes(f), overruled: !!rec && overruled.includes(f) };
+        return { label, field: f, rules: show(f, rules[f]), model: m, used: u, corrected,
+                 added: !corrected && added.includes(f), overruled: !!rec && overruled.includes(f) };
       });
       const bt = used.on_blood_thinner;
-      out.push({ label: "Blood thinner", rules: ["n/a", "v-unk"], model: ["n/a", "v-unk"],
+      out.push({ label: "Blood thinner", field: null, rules: ["n/a", "v-unk"], model: ["n/a", "v-unk"],
                  used: bt === true ? ["Yes (profile)", "v-yes"] : bt === false ? ["No (profile)", "v-no"] : ["—", "v-unk"],
-                 added: false, overruled: false });
+                 corrected: false, added: false, overruled: false });
       return out;
     }
-    function summarySource(m) {
+    // A click on a yes/no Used cell: Yes -> No -> Unknown -> Yes.
+    function nextValue(v) {
+      return v === true ? false : v === false ? null : true;
+    }
+    function summarySource(m, corrections) {
+      if (corrections && Object.keys(corrections).length) return "Summary templated (corrected): the operator set a field above.";
       if (m && (m.added || []).includes("summary")) return "Summary written by " + (m.name || "step-5-preview") + ".";
       return "Summary templated from the record above" + (m && m.record ? "; the model's own summary is not used when any field differs from it." : ".");
     }
@@ -376,7 +387,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       if (d.spoken !== d.text) return "read aloud as “" + d.spoken + "”" + tail;
       return "read aloud as written" + (call && call.outcome !== "ok" ? tail : "");
     }
-    return { callRow, modelBadge, rows, summarySource, messageNote };
+    return { callRow, modelBadge, rows, nextValue, summarySource, messageNote };
   })();
 
   // --- rendering -----------------------------------------------------------
@@ -446,13 +457,24 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     const cell = ([text, cls], extra) => {
       const td = document.createElement("td"); td.textContent = text; td.className = cls + (extra ? " " + extra : ""); return td;
     };
-    for (const r of stepfunView.rows(t, view.rules, view.model, view.answered)) {
+    for (const r of stepfunView.rows(t, view.rules, view.model, view.answered, view.corrections)) {
       const tr = document.createElement("tr");
       const label = document.createElement("td"); label.textContent = r.label;
       const model = cell(r.model, r.overruled ? "overruled" : "");
-      if (r.overruled) model.title = "The rules kept their answer";
-      const used = cell(r.used, "used");
+      if (r.overruled) model.title = r.corrected ? "The operator corrected this field" : "The rules kept their answer";
+      const fixable = !!(view.incidentId && r.field);
+      const used = cell(r.used, "used" + (fixable ? " fix" : ""));
       if (r.added) { const s = document.createElement("span"); s.className = "from"; s.textContent = "+ model"; used.append(s); }
+      if (r.corrected) {
+        const s = document.createElement("span"); s.className = "from op"; s.textContent = "corrected"; s.title = "set by the operator";
+        used.append(s);
+      }
+      if (fixable) {
+        used.tabIndex = 0; used.setAttribute("role", "button");
+        used.title = r.field === "pain_location" ? "Click to correct" : "Click to correct: Yes, No, Unknown";
+        used.addEventListener("click", () => correctField(r.field));
+        used.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); correctField(r.field); } });
+      }
       tr.append(label, cell(r.rules), model, used);
       body.append(tr);
     }
@@ -468,7 +490,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     const summary = $("summary");
     summary.textContent = view.incidentId ? (t.summary || "Waiting for her answer.") : "No incident.";
     if (view.incidentId && t.summary) {
-      const m = document.createElement("span"); m.className = "meta"; m.textContent = stepfunView.summarySource(view.model);
+      const m = document.createElement("span"); m.className = "meta"; m.textContent = stepfunView.summarySource(view.model, view.corrections);
       summary.append(m);
     }
   }
@@ -617,6 +639,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       view.triage = d.triage || null;
       view.rules = d.rules || null;
       view.model = d.model || null;
+      view.corrections = d.corrections || {};
       view.stepfunCalls = d.stepfun_calls || [];
       view.asking = d.current_question || null;
       view.companionReady = !!d.companion_ready;
@@ -657,6 +680,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         view.triage = d.triage;
         view.rules = d.rules || null;
         view.model = d.model || null;
+        view.corrections = d.corrections || {};
         view.answers = d.transcript || [];
         view.answered = d.answered || [];
         view.asking = d.current_question || null;
@@ -777,6 +801,11 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
+      if (r.status === 403) {
+        msg.className = "op-msg err";
+        msg.textContent = pre + "Refused: operator actions work only in a browser on the demo laptop.";
+        return false;
+      }
       if (!r.ok) throw new Error("backend said " + r.status);
       msg.textContent = pre + "Sent.";
       return true;
@@ -797,6 +826,21 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     if (!(await post("/person/answer", { text })) && !input.value) input.value = text;
   });
   $("resolve").addEventListener("click", () => post("/incident/resolve"));
+
+  // The record updates from the triage_update that follows, not from this click.
+  function correctField(field) {
+    if (!view.incidentId) return;
+    const current = (view.triage || {})[field];
+    let value;
+    if (field === "pain_location") {
+      const typed = prompt("Where does it hurt? Leave empty for unknown.", current || "");
+      if (typed === null) return;
+      value = typed.trim() || null;
+    } else {
+      value = stepfunView.nextValue(current);
+    }
+    post("/triage/correct", { field, value }, "Correct " + field.replace("_", " "));
+  }
   $("backend-url").textContent = backend;
 
   // --- Pi speech-to-text (issue #22) ------------------------------------------
