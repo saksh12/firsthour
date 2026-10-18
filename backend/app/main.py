@@ -485,6 +485,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     app.state.guard, app.state.machine, app.state.telemetry = guard, machine, telemetry
     app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
+    app.state.clients = clients
     app.state.inbound_replays = inbound_replays
     app.state.calls, app.state.placed_calls = calls, placed_calls
     app.state.poll_call_result = poll_call_result  # tests run the poller inline
@@ -813,12 +814,25 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 "stepfun_calls": [c for c in stepfun_calls
                                   if snap["incident_id"] and c["incident_id"] == snap["incident_id"]],
             }})
-            while q in clients:
-                try:
-                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue  # recheck: this client may have been dropped
-                await ws.send_json(ev.model_dump())
+            # The dashboard never sends anything, so this only completes when the tab is gone.
+            # Noticing that here, not on the next send, matters: a closed tab's queue would
+            # otherwise outlive it and a SIGTERM would wait on this task until something is emitted.
+            recv = asyncio.ensure_future(ws.receive())
+            try:
+                while q in clients:
+                    get = asyncio.ensure_future(q.get())
+                    done, _ = await asyncio.wait({get, recv}, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
+                    if recv in done:
+                        if recv.exception() is not None or recv.result().get("type") == "websocket.disconnect":
+                            get.cancel()
+                            break
+                        recv = asyncio.ensure_future(ws.receive())  # a stray client message: ignore it
+                    if get in done:
+                        await ws.send_json(get.result().model_dump())
+                    else:
+                        get.cancel()  # recheck: this client may have been dropped
+            finally:
+                recv.cancel()
         except WebSocketDisconnect:
             pass
         finally:

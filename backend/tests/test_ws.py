@@ -1,7 +1,7 @@
 """Dashboard WebSocket (IMPLEMENTATION.md section 6.7)."""
 
+import asyncio
 import json
-
 
 from app.main import create_app
 from conftest import CAREGIVER, STRANGER, LaptopClient
@@ -97,3 +97,36 @@ def test_disconnect_does_not_break_the_incident_flow():
         post_event(c)
         r = c.post("/person/answer", json={"text": "help"})
         assert r.status_code == 200 and r.json()["state"] == "ALERTING"
+
+
+def test_a_closed_tab_ends_its_stream_without_waiting_for_an_event():
+    """Through the raw ASGI interface, like uvicorn (the TestClient cancels the handler on exit,
+    so it can't show this). A tab that closes while nothing is being emitted must end its
+    handler and leave `clients`; otherwise shutdown waits on it and its queue stays behind."""
+    app = create_app(settings())
+    scope = {"type": "websocket", "path": "/ws/dashboard", "headers": [], "query_string": b"",
+             "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8000), "scheme": "ws",
+             "root_path": "", "subprotocols": []}
+
+    async def run():
+        inbox: asyncio.Queue = asyncio.Queue()
+        sent = []
+        await inbox.put({"type": "websocket.connect"})
+
+        async def send(message):
+            sent.append(message)
+
+        task = asyncio.create_task(app(scope, inbox.get, send))
+        for _ in range(200):
+            if any(m["type"] == "websocket.send" for m in sent):
+                break
+            await asyncio.sleep(0.01)
+        assert len(app.state.clients) == 1
+        await inbox.put({"type": "websocket.disconnect", "code": 1001})
+        await asyncio.wait_for(task, timeout=3.0)  # before the fix: never returns
+        return sent
+
+    sent = asyncio.run(run())
+    assert sent[0]["type"] == "websocket.accept"
+    assert json.loads(sent[1]["text"])["data"]["snapshot"] is True
+    assert not app.state.clients
