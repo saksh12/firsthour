@@ -43,6 +43,10 @@ def _noop(*_args) -> None:
     pass
 
 
+def _in_thread(fn: Callable[[], None]) -> None:
+    threading.Thread(target=fn, daemon=True).start()
+
+
 class IncidentMachine:
     def __init__(
         self,
@@ -57,6 +61,7 @@ class IncidentMachine:
         on_close: Callable[[Incident, S], None] = _noop,
         triage_fn: Callable[[list, dict], TriageRecord] = parse_rules,
         rewrite_fn: Callable[[str], str] = lambda text: text,
+        background: Callable[[Callable[[], None]], None] = _in_thread,
     ):
         self.guard = guard
         self.profile = profile
@@ -69,6 +74,7 @@ class IncidentMachine:
         self._on_close = on_close
         self._triage_fn = triage_fn  # StepFun with rule fallback, or rules only
         self._rewrite_fn = rewrite_fn
+        self._background = background  # runs the StepFun refinement; tests pass a synchronous one
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
         # Routes call in from worker threads and tick() from the event loop.
@@ -154,8 +160,11 @@ class IncidentMachine:
                 self._escalate("person needs help" if text.strip() else "no clear answer")
             self._ask()
 
-        triage = self._triage_fn(answers, self.profile)  # StepFun: up to 3 s, then rules
+        # StepFun takes seconds; the caller (and the person's next answer) never waits on it.
+        self._background(lambda: self._refine(inc, answers))
 
+    def _refine(self, inc: Incident, answers: list[tuple[str, str]]) -> None:
+        triage = self._triage_fn(answers, self.profile)  # StepFun: up to 15 s, then rules
         with self._lock:
             # A newer answer (or the end of the incident) makes this result stale.
             if self.incident is inc and len(inc.answers) == len(answers) and triage != inc.triage:
