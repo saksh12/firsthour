@@ -37,7 +37,7 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | `backend/` unlock rules | Allowlist, one-time code, 3 tries, signed commands | ✅ live | Full test suite; checked on the real Pi (M4) |
 | `backend/` triage | Rule-based answers → triage record | ✅ | Never invents a "no" the person didn't say. Dashboard shows "Unclear" for an answer the rules couldn't read, "Not said" for no answer. Hedged amounts like "a little, not very much" are not read yet |
 | `backend/` StepFun | `step-5-preview` triage + reply rewrite, rule fallback | ✅ live | Runs in the background (45 s, `max_tokens` 5000, `reasoning_effort` low) after the instant rule record. Rules always win; the model can only add a worrying answer (head strike, can't move, bleeding), never a reassuring one. Late results still add their worrying findings. Measured Oct 18: triage 5-38 s (longest on unclear answers); rewrite 2.3 s early on, 6-12 s by morning (deadline now 10 s, Q&A 12 s) |
-| `backend/` Sentry | One trace per incident, logs, uptime `/health` | ✅ Traces and logs arrive | Uptime monitor on a tunnel still to set up |
+| `backend/` Sentry | One trace per incident, logs, AI Agents attributes on StepFun calls, uptime `/health`, masked Session Replay on the dashboard | ✅ Traces and logs arrive | `unlock_to_latch` span ends at the Pi's latch report. Replay and AI Agents views not yet checked in the real project; uptime monitor on a tunnel still to set up |
 | `backend/` voice | Speak the fixed questions and caregiver replies | ✅ live | Cached ElevenLabs TTS + one playback worker; afplay→say→log fallback; reports each finished line (silence timer) and drops leftover lines when an incident ends. Real stock voice played in three knock runs (`STUB_ELEVENLABS=0`) |
 | `edge/` sensor node | Two-sensor fusion, local alarm + clock, offline log + replay, verifies commands | ✅ | Obeys only its own incident |
 | `edge/` process split | `supervisor.py`: safety (QNX priority 21), uplink (10), whisper-server (8), restarted if they die | ✅ live | #22 step 1, PR #38. `pidin` on the Pi shows the priorities. `kill -9` of the uplink: back in 1.6-1.8 s, alarm untouched. `kill -9` of the safety process, idle and mid-incident: resumed the same incident and reclaimed the hub in 1.8-3.9 s. The single-process reader stays the default in `connect.md` |
@@ -56,7 +56,7 @@ The sensor hub is an **ESP32-S3-BOX-3**, not an Arduino: `arduino/hub/hub.ino` r
 | Docs | `docs/sentry-story.md` started; demo script and Devpost draft in PR #31 | 🔶 | |
 | Paper or Base44 | Pick one sponsor for the dashboard | ⬜ | Decision was due 3:00 PM |
 
-Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **463 passed** (Oct 18, #38).
+Tests: `backend/.venv/bin/python -m pytest -q backend/tests edge/` gives **488 passed** (Oct 18, `backend/sentry-products`).
 
 ### Still open
 
