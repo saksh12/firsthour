@@ -142,6 +142,11 @@ Stack with every stub off (`STUB_*=0`, real Sentry) on spare ports; the Pi-side 
 - [ ] (A) `edge/link.py` drops a message already received when the peer closes the socket; delivery stays at-least-once (the backend dedupes), but the uplink could hand over cleanly
 - [ ] (C) Photon filters inbound texts that look like one-time codes (`listFilteredVerificationCodes`): a real `UNLOCK 1234` reply from a phone is still to be tried through the live line
 
+## Issue #24 (branch `dashboard/stepfun-visible`)
+
+- [x] (D · Droid) Make StepFun visible: the Triage panel shows Rules, step-5-preview and the record in use side by side (model fields it added marked "+ model", answers the rules kept crossed out), a badge with the call's measured latency, "model: pending…" while it runs, or "fallback: rules (timeout 45 s)" / the rejection reason. A StepFun calls panel logs every triage, reply rewrite and caregiver Q&A call with ms and outcome; caregiver rows say whether the rewrite was used or fell back. Checked with pytest, `node --test`, and a headless browser against a fake StepFun server; not yet against live step-5-preview
+- [ ] (B/D) Let the operator correct a misread triage field: no backend endpoint can carry it yet (`/person/answer` only appends the next answer)
+
 ## Proposed
 
 <!-- Ideas that aren't in IMPLEMENTATION.md go here. Don't build them without team agreement. -->
