@@ -22,9 +22,18 @@ Node 22+ (Photon's SDK requires it). In stub mode it needs no keys and no networ
 | `POST /send` `{ to, body }` | Sends via Photon in `to`'s conversation with the agent line; stub records to an in-memory outbox. `409` if `to` hasn't texted the line yet |
 
 Inbound: in the live path a poller pulls received iMessages every 2 s and forwards
-caregiver replies to the backend's `POST /comms/inbound` as `{ sender, text }`, with
-`Authorization: Bearer $SHARED_SECRET` (the backend refuses inbound without it when
+caregiver replies to the backend's `POST /comms/inbound` as `{ sender, text, messageId }`,
+signed with `X-Signature`/`X-Timestamp` (the backend refuses unsigned inbound when
 `STUB_PHOTON=0`). The gateway listens on localhost only.
+
+Durable (issue #23): the inbound cursor and each caregiver's conversation live in
+`GATEWAY_STATE_FILE` (default `comms-gateway/.state/gateway.json`, gitignored, holds
+phone numbers). The cursor moves only after the backend accepts a reply, so a reply
+that lands while the gateway (or backend) is down is forwarded on the next poll after
+restart, once: a replay the backend already has returns 409 and counts as done.
+Alerts still reach a caregiver who texted the shared line before a restart.
+TODO: Photon's Socket.IO stream (`/v1/projects/{id}/events/ws`, `subscribe {startSeq}`)
+would replace the poll; it needs `socket.io-client` and was left out of #23's PR.
 
 The backend calls `/send` itself when `STUB_PHOTON=0` (`COMMS_GATEWAY_URL`).
 

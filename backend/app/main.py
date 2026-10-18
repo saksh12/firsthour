@@ -23,7 +23,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
-from .incident import IncidentMachine
+from .calls import VoiceCalls, companion_token, parse_postcall, verify_postcall_signature
+from .coordinator import parse_names, parse_order
+from .incident import CLOSING_LINE, REASK_LINE, IncidentMachine
 from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_audio, verify_event, verify_inbound, verify_poll
@@ -40,6 +42,9 @@ TICK_S = 0.25
 # starts anyway: the assistant line plus question 1, each up to a 4 s TTS fetch on a cold cache.
 PLAYBACK_GRACE_S = 12
 WS_QUEUE_MAX = 200
+# Reachable through the tunnel, each with its own auth: Sentry uptime, and ElevenLabs'
+# post-call webhook and read-only incident tool (issue #23).
+TUNNEL_PATHS = {"/health", "/voice/postcall", "/voice/incident"}
 # A recorded answer is 16 kHz mono 16-bit, a few seconds long: 32 KB per second.
 CLIP_MAX_BYTES = 16000 * 2 * 15
 CLIP_TTL_S = 60  # an unfetched clip is deleted after this; audio is never written to disk
@@ -70,6 +75,11 @@ class PersonAnswer(BaseModel):
     text: str
 
 
+class CompanionRelay(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    urgency: str = Field(default="normal", pattern="^(normal|urgent)$")
+
+
 class PersonListening(BaseModel):
     seconds: float = Field(gt=0, le=15)  # how long the dashboard records her answer
 
@@ -96,6 +106,13 @@ def load_settings() -> dict:
         "ELEVENLABS_MODEL": os.getenv("ELEVENLABS_MODEL", ""),
         "ELEVENLABS_BASE_URL": os.getenv("ELEVENLABS_BASE_URL", ""),
         "VOICE_PLAYBACK": os.getenv("VOICE_PLAYBACK", "1") == "1",
+        "CAREGIVER_NAMES": os.getenv("CAREGIVER_NAMES", ""),
+        "ELEVENLABS_AGENT_ID": os.getenv("ELEVENLABS_AGENT_ID", ""),
+        "ELEVENLABS_PHONE_NUMBER_ID": os.getenv("ELEVENLABS_PHONE_NUMBER_ID", ""),
+        "ELEVENLABS_WEBHOOK_SECRET": os.getenv("ELEVENLABS_WEBHOOK_SECRET", ""),
+        "VOICE_TOOL_TOKEN": os.getenv("VOICE_TOOL_TOKEN", ""),
+        "ELEVENLABS_COMPANION_AGENT_ID": os.getenv("ELEVENLABS_COMPANION_AGENT_ID", ""),
+        "VOICE_CALL_AFTER_SECONDS": float(os.getenv("VOICE_CALL_AFTER_SECONDS", "20")),
         "PI_STT": os.getenv("PI_STT", "0") == "1",
         "PI_STT_HOLD_S": float(os.getenv("PI_STT_HOLD_SECONDS", "20")),
     }
@@ -185,29 +202,81 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         log.info("say ref=%s", line_ref(text))
         voice.speak(text)
 
-    def deliver(incident_id: str, to: list[str], text: str) -> None:
+    def deliver(incident_id: str, to: list[str], text: str, kind: str = "alert") -> None:
+        # "sent" means Photon's API accepted it. Photon reports no delivered/read status we
+        # use, so the dashboard never claims one; "acknowledged" is the caregiver replying.
         with telemetry.span(incident_id, "photon_send", stub=False):
             for number in to:
                 try:
                     r = urllib_transport(s["COMMS_GATEWAY_URL"].rstrip("/") + "/send", {},
                                          {"to": number, "body": text}, 10)
-                    log.info("alert delivered incident_id=%s to=%s id=%s", incident_id, number, r.get("id"))
+                    log.info("%s delivered incident_id=%s to=%s id=%s", kind, incident_id, number, r.get("id"))
+                    emit("delivery_status", {"to": [number], "incident_id": incident_id, "kind": kind,
+                                             "status": "sent"})
                 except urllib.error.HTTPError as e:
-                    log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
+                    log.error("%s not delivered incident_id=%s to=%s error=%s", kind, incident_id, number, e)
                     if e.code == 409:
-                        undelivered[number] = (incident_id, text)
-                        emit("message_out", {"to": [number], "incident_id": incident_id, "kind": "alert",
+                        if kind == "alert":
+                            undelivered[number] = (incident_id, text)
+                        emit("message_out", {"to": [number], "incident_id": incident_id, "kind": kind,
                                              "delivered": False,
                                              "reason": "caregiver has not texted the agent line yet"})
+                    emit("delivery_status", {"to": [number], "incident_id": incident_id, "kind": kind,
+                                             "status": "blocked" if e.code == 409 else "failed"})
                 except (OSError, ValueError) as e:
-                    log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
+                    log.error("%s not delivered incident_id=%s to=%s error=%s", kind, incident_id, number, e)
+                    emit("delivery_status", {"to": [number], "incident_id": incident_id, "kind": kind,
+                                             "status": "failed"})
+
+    def send_text(incident_id: str, to: list[str], text: str, kind: str) -> None:
+        """Follow-up texts in the incident thread (answers, acks, stand-by, the door code).
+        A "code" text is shown on the dashboard only as sent, never its text."""
+        if s["STUB_PHOTON"]:
+            outbox.append({"to": to, "incident_id": incident_id, "text": text, "kind": kind,
+                           "ts": int(time.time() * 1000)})
+            emit("delivery_status", {"to": to, "incident_id": incident_id, "kind": kind, "status": "sent",
+                                     "stub": True})
+        else:
+            threading.Thread(target=deliver, args=(incident_id, to, text, kind), daemon=True).start()
+        out = {"to": to, "incident_id": incident_id, "kind": kind}
+        emit("message_out", out if kind == "code" else {**out, "text": text})
+
+    # conversation_id -> (incident_id, number) for calls we placed: only those may record a
+    # commitment from the post-call webhook.
+    placed_calls: dict[str, tuple[str, str]] = {}
+
+    def place_call(incident_id: str, number: str, variables: dict) -> None:
+        def run() -> None:
+            try:
+                with telemetry.span(incident_id, "voice_call", stub=not calls.real):
+                    r = calls.place(number, variables)
+                placed_calls[r["conversation_id"]] = (incident_id, number)
+                emit("call_update", {"incident_id": incident_id, "status": "placed", "stub": r["stubbed"],
+                                     "name": names.get(number)})
+            except Exception as e:  # a failed call must never touch the incident flow
+                detail = ""
+                if isinstance(e, urllib.error.HTTPError):
+                    # ElevenLabs explains refusals (e.g. a key missing agent permissions) in the body.
+                    try:
+                        detail = f" status={e.code} body={e.read()[:300].decode(errors='replace')}"
+                    except OSError:
+                        detail = f" status={e.code}"
+                log.error("voice call failed incident_id=%s error=%s%s", incident_id, type(e).__name__, detail)
+                emit("call_update", {"incident_id": incident_id, "status": "failed", "name": names.get(number)})
+        if calls.real:
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            run()
 
     def send_alert(incident_id: str, text: str) -> None:
         to = sorted(guard.allowed)
         if s["STUB_PHOTON"]:
             with telemetry.span(incident_id, "photon_send", stub=True):
                 outbox.append({"to": to, "incident_id": incident_id, "text": text, "ts": int(time.time() * 1000)})
+            emit("delivery_status", {"to": to, "incident_id": incident_id, "kind": "alert", "status": "sent",
+                                     "stub": True})
         else:
+            emit("delivery_status", {"to": to, "incident_id": incident_id, "kind": "alert", "status": "queued"})
             # Off the incident lock and the event loop: a slow gateway must not stall the flow.
             threading.Thread(target=deliver, args=(incident_id, to, text), daemon=True).start()
         # The dashboard gets that an alert went out, not its text: the text carries the code.
@@ -265,12 +334,26 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
            if "VOICE_TRANSPORT" in s else {}),  # tests only
     )
     log.info("voice: %s", "ElevenLabs real" if voice.real else "stub (say/log only)")
+    names = parse_names(s.get("CAREGIVER_NAMES", ""))
+    calls = VoiceCalls(
+        stub=s.get("STUB_ELEVENLABS", True), api_key=s.get("ELEVENLABS_API_KEY", ""),
+        agent_id=s.get("ELEVENLABS_AGENT_ID", ""), phone_number_id=s.get("ELEVENLABS_PHONE_NUMBER_ID", ""),
+        base_url=s.get("ELEVENLABS_BASE_URL", ""),
+        **({"transport": s["CALLS_TRANSPORT"]} if "CALLS_TRANSPORT" in s else {}),  # tests only
+    )
+    log.info("voice calls: %s", "ElevenLabs over SIP" if calls.real else "stub (logged only)")
+    companion_enabled = bool(not s.get("STUB_ELEVENLABS", True)
+                             and s.get("ELEVENLABS_API_KEY") and s.get("ELEVENLABS_COMPANION_AGENT_ID"))
+    log.info("companion: %s", "configured, waiting for script completion" if companion_enabled else "disabled")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
                               playback_grace_s=PLAYBACK_GRACE_S,
                               emit=emit, on_close=on_close, speak=speak,
                               send_alert=send_alert,
                               triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
-                              rewrite_fn=stepfun.rewrite)
+                              rewrite_fn=stepfun.rewrite,
+                              send_text=send_text, place_call=place_call, answer_fn=stepfun.answer,
+                              call_order=parse_order(s["CAREGIVER_NUMBERS"]) or None, names=names,
+                              call_after_s=s.get("VOICE_CALL_AFTER_SECONDS", 20), reask=s["PI_STT"])
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -284,7 +367,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 await asyncio.sleep(TICK_S)
 
         # Pre-generate the fixed script so the first question plays with no API call.
-        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE])
+        voice.prewarm([text for _, text in QUESTIONS] + [ASSISTANT_LINE, REASK_LINE, CLOSING_LINE])
         task = asyncio.create_task(ticker())
         yield
         task.cancel()
@@ -296,8 +379,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     @app.middleware("http")
     async def tunnel_reaches_health_only(request: Request, call_next):
-        # The Sentry uptime tunnel publishes the whole port; only /health may come through it.
-        if _proxied(request.headers) and request.url.path != "/health":
+        # The tunnel publishes the whole port; only TUNNEL_PATHS may come through it.
+        if _proxied(request.headers) and request.url.path not in TUNNEL_PATHS:
             return JSONResponse({"detail": "not found"}, status_code=404)
         return await call_next(request)
     if origins:
@@ -310,6 +393,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     app.state.voice = voice
     app.state.queues, app.state.events, app.state.outbox, app.state.spoken = queues, events, outbox, spoken
     app.state.inbound_replays = inbound_replays
+    app.state.calls, app.state.placed_calls = calls, placed_calls
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     def health():
@@ -509,6 +593,72 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             threading.Thread(target=deliver, args=(pending[0], [msg.sender.strip()], pending[1]),
                              daemon=True).start()
         return machine.caregiver_reply(msg.sender, msg.text)
+
+    @app.post("/voice/postcall")
+    async def voice_postcall(request: Request):
+        """ElevenLabs post-call webhook: carry a finished call back into the incident thread."""
+        raw = await request.body()
+        ok, reason = verify_postcall_signature(s.get("ELEVENLABS_WEBHOOK_SECRET", ""), raw,
+                                               request.headers.get("ElevenLabs-Signature"))
+        if not ok:
+            log.warning("post-call webhook rejected reason=%s", reason)
+            raise HTTPException(status_code=401, detail=reason)
+        try:
+            call = parse_postcall(json.loads(raw))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="malformed webhook")
+        if call is None:
+            return {"ok": True, "ignored": True}
+        incident_id, number = placed_calls.get(call["conversation_id"], (call["incident_id"], None))
+        result = machine.record_call_result(incident_id, number, call["user_turns"], call["summary"])
+        log.info("post-call webhook incident_id=%s placed_by_us=%s accepted=%s",
+                 incident_id, number is not None, result.get("accepted"))
+        return {"ok": True, **result}
+
+    @app.get("/voice/incident")
+    def voice_incident(request: Request):
+        """Read-only tool for the ElevenLabs agent: incident facts, never the code, never an action."""
+        token = s.get("VOICE_TOOL_TOKEN", "")
+        auth = request.headers.get("Authorization", "")
+        if not token or not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
+            raise HTTPException(status_code=401, detail="token required")
+        facts = machine.facts()
+        return {"active": True, **facts} if facts else {
+            "active": False, "unlock_policy": "Voice can never unlock the door."}
+
+    # --- companion: an ElevenLabs agent in the dashboard talks with her after the fixed script.
+    # Its tools are client tools that run in the dashboard and call these laptop-only routes,
+    # so nothing about it is reachable through the tunnel.
+
+    @app.get("/companion/session", dependencies=[Depends(laptop_only)])
+    def companion_session():
+        agent = s.get("ELEVENLABS_COMPANION_AGENT_ID", "")
+        if not companion_enabled:
+            return {"enabled": False}
+        facts = machine.facts()
+        if not facts or facts["state"] == "CHECKING":
+            raise HTTPException(status_code=409, detail="no alerted incident")
+        if not machine.snapshot().get("companion_ready"):
+            raise HTTPException(status_code=409, detail="fixed questions still finishing")
+        try:
+            token = companion_token(s["ELEVENLABS_API_KEY"], agent, s.get("ELEVENLABS_BASE_URL", ""))
+        except Exception as e:
+            log.error("companion token failed error=%s", type(e).__name__)
+            raise HTTPException(status_code=502, detail="could not start the companion")
+        log.info("companion session token issued incident_id=%s", current_incident_id())
+        return {"enabled": True, "token": token,
+                "variables": {"patient_name": facts["patient"], "room": facts["room"]}}
+
+    @app.get("/companion/facts", dependencies=[Depends(laptop_only)])
+    def companion_facts():
+        """get_incident_facts: the same code-free facts the caregiver call agent sees."""
+        facts = machine.facts()
+        return {"active": True, **facts} if facts else {"active": False}
+
+    @app.post("/companion/relay", dependencies=[Depends(laptop_only)])
+    def companion_relay(body: CompanionRelay):
+        """relay_to_caregiver: the agent decided something she said matters."""
+        return machine.companion_relay(body.message, body.urgency)
 
     @app.get("/incident")
     def incident():

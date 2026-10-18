@@ -13,13 +13,17 @@ def format_down(seconds: float) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def format_alert(profile: dict, down_s: float, triage: TriageRecord, code: str) -> str:
+def format_alert(profile: dict, down_s: float, triage: TriageRecord) -> str:
+    """The first text goes to every caregiver, so it carries no door code: the code is
+    texted only to a caregiver who says they're coming (coordinator.claimer_reply)."""
     lines = [
-        f"FALL ALERT: {profile['name']} ({profile['room']}). Down {format_down(down_s)}.",
+        f"FirstHour: {profile['name']} has had a fall in the {profile['room'].lower()}. "
+        f"Down {format_down(down_s)}.",
         summarize(triage, include_meds=False),
     ]
     if profile.get("on_blood_thinner"):
         lines.append("NOTE: on a blood thinner.")
-    lines.append(f"Reply UNLOCK {code} to open the front door.")
-    lines.append(f"Or reply with a message and we'll read it to {profile.get('pronoun_object', 'them')}.")
+    lines.append("How soon can you be here? Reply with an ETA like \"10 min\" or ON MY WAY, "
+                 "and we'll text you the door code.")
+    lines.append(f"Or ask a question, or send a message and we'll read it to {profile.get('pronoun_object', 'them')}.")
     return "\n".join(lines)

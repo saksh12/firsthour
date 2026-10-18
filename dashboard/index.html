@@ -183,6 +183,10 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   <section class="grid">
     <div class="panel full">
       <p class="label">Conversation (live)</p>
+      <div class="op-row">
+        <span id="companion-status" role="status" aria-live="polite">Companion waits until the five questions finish.</span>
+        <button class="ghost" id="companion-retry" type="button" hidden>Retry companion</button>
+      </div>
       <ul class="convo" id="convo"><li class="empty">Nothing yet. Lines appear as they play in her earbuds and as the Pi transcribes her answers.</li></ul>
     </div>
 
@@ -196,6 +200,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     <div class="panel">
       <p class="label">What she said</p>
       <ul class="qa" id="qa"></ul>
+    </div>
+
+    <div class="panel">
+      <p class="label">Caregivers</p>
+      <ul class="attempts" id="responders"><li class="empty">No reply yet.</li></ul>
+      <div class="source" id="calls-note"></div>
     </div>
 
     <div class="panel">
@@ -269,7 +279,8 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   let unlockFailed = false; // the Pi sent U but the latch never answered ACK,U
 
   function blank() {
-    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null };
+    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], answered: [], triage: null, asking: null,
+             responders: {}, delivery: "", calls: "", companionReady: false };
   }
 
   // --- rendering -----------------------------------------------------------
@@ -379,7 +390,32 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     }
   }
 
-  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); }
+  // Honest states only: "sent" = Photon's API accepted it. Delivered/read are never shown.
+  const RESPONDER_TEXT = { acknowledged: "replied", accepted: "on the way", arriving: "on the way", arrived: "at the door" };
+  function renderResponders() {
+    const ul = $("responders");
+    const rs = Object.values(view.responders);
+    if (!rs.length) {
+      const li = document.createElement("li"); li.className = "empty";
+      li.textContent = view.delivery || "No reply yet.";
+      ul.replaceChildren(li);
+    } else {
+      ul.replaceChildren(...rs.map((r) => {
+        const li = document.createElement("li");
+        const pill = document.createElement("span");
+        pill.className = "pill " + (r.status === "acknowledged" ? "no" : "ok");
+        pill.textContent = r.assigned ? "ASSIGNED" : r.status.toUpperCase();
+        const who = document.createElement("span"); who.className = "mono"; who.textContent = r.name || r.number || "caregiver";
+        const what = document.createElement("span");
+        what.textContent = RESPONDER_TEXT[r.status] + (r.eta_min != null && r.status !== "arrived" ? ` · ETA ${r.eta_min} min` : "");
+        li.append(pill, who, what);
+        return li;
+      }));
+    }
+    $("calls-note").textContent = view.calls;
+  }
+
+  function render() { renderStatus(); renderClock(); renderDoor(); renderTriage(); renderQA(); renderResponders(); }
 
   function addAttempt(d) {
     const ul = $("attempts");
@@ -443,6 +479,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
   // --- events (section 6.7) --------------------------------------------------
 
   function onSnapshot(d) {
+    if (d.incident_id !== view.incidentId || d.state === "IDLE") companion.stop();
     view = blank();
     view.state = d.state;
     view.incidentId = d.incident_id;
@@ -452,8 +489,12 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       view.answered = d.answered || [];
       view.triage = d.triage || null;
       view.asking = d.current_question || null;
+      view.companionReady = !!d.companion_ready;
+      for (const r of d.responders || []) view.responders[r.number] = r;
     }
     pi.setAvailable(!!d.pi_stt);
+    // Page reloaded after the script finished: pick the companion back up.
+    if (view.companionReady) companion.start(d.incident_id);
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
   }
 
@@ -462,11 +503,13 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       case "incident_update":
         if (d.snapshot) { onSnapshot(d); break; }
         if (d.state === "IDLE") {
+          companion.stop();
           view = blank();
           log("Back to IDLE");
           break;
         }
         if (d.incident_id && d.incident_id !== view.incidentId) {
+          companion.stop();
           convo.forIncident(d.incident_id);
           view = blank();
           view.incidentId = d.incident_id;
@@ -484,13 +527,33 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
         break;
       case "message_out":
-        log(d.delivered === false
-          ? "Alert NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". It goes out when they text the line."
-          : "Alert sent to " + (d.to || []).join(", "));
+        if (d.delivered === false) log("Text NOT delivered to " + (d.to || []).join(", ") + ": " + d.reason + ". An alert goes out when they text the line.");
+        else if (d.kind === "alert") log("Alert queued for " + (d.to || []).join(", "));
+        else if (d.kind === "code") log("Door code texted to " + (d.to || []).join(", ") + " (they said they're coming)");
+        else log("Texted " + (d.to || []).join(", ") + " (" + d.kind.replace("_", " ") + "): “" + d.text + "”");
+        break;
+      case "delivery_status":
+        if (d.status === "acknowledged" || d.status === "responder_assigned") break;  // shown in Caregivers
+        if (d.kind === "alert") view.delivery = "Alert " + d.status + (d.stub ? " (stub)" : "") + ", waiting for a reply.";
+        log((d.kind || "text") + " " + d.status + " → " + (d.to || []).join(", ") + (d.status === "sent" ? " (Photon accepted)" : ""));
         break;
       case "message_in":
-        convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”", "read aloud as one calm sentence");
-        log("Caregiver " + d.sender + ": “" + d.text + "” (read aloud)");
+        if (d.sender && !view.responders[d.sender]) view.responders[d.sender] = { number: d.sender, status: "acknowledged" };
+        convo.row("caregiver", "Caregiver " + d.sender).set("“" + d.text + "”",
+          d.question ? "question, answered by text" : d.spoken ? "read aloud as one calm sentence" : "read aloud from a fixed template");
+        log("Caregiver " + d.sender + ": “" + d.text + "”" + (d.question ? " (question, answered by text)" : d.spoken ? " (read aloud)" : ""));
+        if (d.spoken) companion.tell(`Caregiver message, already read aloud to her: "${d.spoken}"`);
+        break;
+      case "responder_update":
+        for (const k of Object.keys(view.responders)) if (d.assigned) view.responders[k].assigned = false;
+        view.responders[d.number] = d;
+        log((d.name || d.number) + ": " + RESPONDER_TEXT[d.status] + (d.eta_min != null ? " · ETA " + d.eta_min + " min" : "") + (d.via === "call" ? " (said on the call)" : ""));
+        companion.tell(`${d.name || "A caregiver"} is ${RESPONDER_TEXT[d.status]}${d.eta_min != null ? ", ETA " + d.eta_min + " minutes" : ""}. She has already been told.`);
+        break;
+      case "call_update":
+        view.calls = "Voice call " + d.status + (d.name ? " · " + d.name : "") + (d.reason ? " · " + d.reason : "") + (d.stub ? " (stub)" : "");
+        log(view.calls + (d.summary ? ": " + d.summary : ""));
+        if (d.status === "completed" && d.summary) companion.tell("A phone call with a caregiver just ended. Summary: " + d.summary);
         break;
       case "unlock_attempt":
         if (d.allowed) unlockFailed = false;
@@ -499,6 +562,11 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         break;
       case "voice_line":
         convo.voiceLine(d);
+        companion.duck(d.state === "playing");  // the box's own voice never talks over the agent
+        break;
+      case "script_done":
+        view.companionReady = true;
+        companion.start(d.incident_id);
         break;
       case "question_played":
         pi.onQuestionPlayed(d);
@@ -507,7 +575,10 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
         pi.onHeard(d);
         break;
       case "device_status":
-        if (d.event === "local_unlock") { localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false; }
+        if (d.event === "local_unlock") {
+          localUnlockUntil = Date.now() + LOCAL_UNLOCK_HOLD_MS; unlockFailed = false;
+          companion.tell("The device confirmed the door unlocked. This does not confirm that anyone has arrived.");
+        }
         if (d.event === "unlock_failed") unlockFailed = true;
         log("Device " + d.device_id + ": " + d.event.replace(/_/g, " "));
         break;
@@ -534,6 +605,7 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
       } catch (e) { console.warn("bad event", e); }
     };
     ws.onclose = () => {
+      companion.stop("Backend disconnected. Companion is not listening.", true);
       $("conn").classList.remove("live");
       $("conn-text").textContent = "Reconnecting…";
       setTimeout(connect, retry);
@@ -644,7 +716,8 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     }
 
     function onView() {
-      if (view.state === "IDLE" || !active()) closeMic();
+      // After the script the companion agent owns the mic.
+      if (view.state === "IDLE" || !active() || !view.asking) closeMic();
       else openMic().catch(() => {});
     }
 
@@ -740,6 +813,98 @@ button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s eas
     if (!window.MediaRecorder || !navigator.mediaDevices) box.disabled = true;
     box.addEventListener("change", onView);
     return { setAvailable, onView, onQuestionPlayed, onHeard, active };
+  })();
+
+  // --- Companion (ElevenLabs Agents) -----------------------------------------
+  // After the fixed script, an ElevenLabs agent talks with her through this Mac (AirPods).
+  // The backend mints a short-lived token, so the API key never reaches the page. Its two
+  // client tools call laptop-only routes: read incident facts (never the door code), and
+  // text the caregiver something she said that the agent judges important. Caregiver news
+  // arrives as contextual updates. It has no way to unlock anything.
+
+  const companion = (() => {
+    const SDK = "https://esm.sh/@elevenlabs/client@1.28.0";
+    let conv = null, starting = false, generation = 0, ducked = false;
+    const status = $("companion-status"), retryButton = $("companion-retry");
+    function show(text, retry = false) {
+      status.textContent = text;
+      retryButton.hidden = !retry;
+      log(text);
+    }
+    async function json(r) {
+      if (!r.ok) throw new Error("backend said " + r.status);
+      return JSON.stringify(await r.json());
+    }
+    retryButton.addEventListener("click", () => start(view.incidentId));
+
+    async function start(incidentId) {
+      if (conv || starting || !incidentId || !view.companionReady) return;
+      starting = true;
+      const attempt = ++generation;
+      const current = () => attempt === generation && view.incidentId === incidentId && view.state !== "IDLE";
+      show("Connecting companion. Not listening yet.");
+      try {
+        const r = await fetch(backend + "/companion/session");
+        if (!current()) return;
+        if (!r.ok) throw new Error("backend said " + r.status);
+        const j = await r.json();
+        if (!current()) return;
+        if (!j.enabled) {
+          show("Companion is off and is not listening. Check the agent ID and STUB_ELEVENLABS=0, then restart the backend.", true);
+          return;
+        }
+        const { Conversation } = await import(SDK);
+        if (!current()) return;
+        const session = await Conversation.startSession({
+          conversationToken: j.token,
+          connectionType: "webrtc",
+          dynamicVariables: j.variables,
+          clientTools: {
+            get_incident_facts: async () => current()
+              ? json(await fetch(backend + "/companion/facts")) : JSON.stringify({ active: false }),
+            relay_to_caregiver: async (p) => {
+              if (!current()) return JSON.stringify({ sent: false, reason: "session ended" });
+              const body = { message: String((p && p.message) || ""), urgency: p && p.urgency === "urgent" ? "urgent" : "normal" };
+              const res = await json(await fetch(backend + "/companion/relay", {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+              log("Companion relay request result: " + res);
+              return res;
+            },
+          },
+          onMessage: (msg) => {
+            if (!current()) return;
+            const user = msg.source === "user";
+            convo.row(user ? "person" : "voice", user ? "Margaret → companion" : "Companion agent").set(msg.message || "");
+          },
+          onDisconnect: () => {
+            if (!current()) return;
+            generation++; conv = null; starting = false;
+            show("Companion disconnected and is not listening. Retry to reconnect.", true);
+          },
+          onError: () => {
+            if (current()) stop("Companion connection failed. Not listening. Check microphone permission and retry.", true);
+          },
+        });
+        if (!current()) { await session.endSession(); return; }
+        conv = session;
+        duck(ducked);
+        show("Companion connected. Microphone is active.");
+      } catch (e) {
+        if (current()) show("Companion didn't start (" + e.message + "). Not listening. Check microphone permission and retry.", true);
+      } finally { if (attempt === generation) starting = false; }
+    }
+    function stop(message = "Companion waits until the five questions finish.", retry = false) {
+      generation++; starting = false;
+      const c = conv; conv = null;
+      if (c) c.endSession().catch(() => {});
+      show(message, retry);
+    }
+    function tell(text) { if (conv) try { conv.sendContextualUpdate(text); } catch (e) { /* session closing */ } }
+    function duck(on) {
+      ducked = on;
+      if (conv) Promise.resolve(conv.setVolume({ volume: on ? 0 : 1 })).catch(() => {});
+    }
+    return { start, stop, tell, duck };
   })();
 
   // --- speech input (Web Speech API, IMPLEMENTATION.md 7 Phase 1 step 6) ------

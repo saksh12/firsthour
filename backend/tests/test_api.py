@@ -59,11 +59,11 @@ def test_unsigned_event_rejected(client):
 
 
 def escalate(client) -> str:
-    """Fall, the person asks for help, return the code from the simulated caregiver inbox."""
+    """Fall, the person asks for help, return the incident's door code (it is texted only once a
+    caregiver commits, so read it from the machine to keep the state at ALERTING)."""
     assert post_event(client).status_code == 200
     client.post("/person/answer", json={"text": "Help, I slipped and can't move my leg"})
-    msgs = client.get("/comms/stub/outbox").json()["messages"]
-    return re.search(r"UNLOCK (\d{4})", msgs[-1]["text"]).group(1)
+    return client.app.state.machine.incident.code
 
 
 def test_fall_opens_checking_with_no_alert_yet(client):
@@ -132,9 +132,9 @@ def test_resolve_endpoint(client):
 
 def test_caregiver_message_is_read_aloud(client):
     escalate(client)
-    r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "I'm 2 minutes away"}).json()
+    r = client.post("/comms/inbound", json={"sender": CAREGIVER, "text": "Hang in there, I love you"}).json()
     assert r == {"type": "message", "accepted": True}
-    assert client.app.state.spoken[-1] == "I'm 2 minutes away"
+    assert client.app.state.spoken[-2] == "Hang in there, I love you"
     assert client.get("/incident").json()["state"] == "RESPONDING"
     assert signed_poll(client).json() == {"commands": []}
 
@@ -184,7 +184,20 @@ def test_real_photon_alert_goes_to_the_gateway(monkeypatch):
     assert done.wait(2)
     url, body = sent[0]
     assert url == "http://gw:8787/send" and body["to"] == CAREGIVER
-    assert re.search(r"Reply UNLOCK \d{4}", body["body"])
+    assert "How soon can you be here?" in body["body"] and not re.search(r"UNLOCK \d{4}", body["body"])
+
+
+def test_door_code_goes_only_to_the_committed_caregiver_and_never_to_the_dashboard():
+    c = LaptopClient(create_app(settings()))
+    post_event(c)
+    c.post("/person/answer", json={"text": "help"})
+    code = c.app.state.machine.incident.code
+    assert not any(f"UNLOCK {code}" in m["text"] for m in c.get("/comms/stub/outbox").json()["messages"])
+    c.post("/comms/inbound", json={"sender": CAREGIVER, "text": "on my way, 5 min"})
+    inbox = c.get("/comms/stub/outbox").json()["messages"]
+    assert inbox[-1]["to"] == [CAREGIVER] and f"reply UNLOCK {code}." in inbox[-1]["text"]
+    outs = [e.data for e in c.app.state.events if e.type == "message_out" and e.data.get("kind") == "code"]
+    assert outs and all("text" not in d for d in outs)
 
 
 def test_alert_blocked_by_shared_line_is_sent_once_the_caregiver_texts(monkeypatch):
@@ -269,7 +282,7 @@ def test_three_demo_runs_with_reset_between_all_end_clean(client):
         ts = int(time.time() * 1000) + run
         assert post_event(client, ts=ts).status_code == 200
         client.post("/person/answer", json={"text": "help"})
-        code = re.search(r"UNLOCK (\d{4})", client.get("/comms/stub/outbox").json()["messages"][-1]["text"]).group(1)
+        code = client.app.state.machine.incident.code
         assert client.post("/comms/inbound", json={"sender": CAREGIVER, "text": f"UNLOCK {code}"}).json()["allowed"]
         local = f"bath-01-{ts}"
         unlock = signed_poll(client).json()["commands"]
