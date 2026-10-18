@@ -21,6 +21,7 @@ from .models import IncidentState as S
 from .models import TriageRecord
 from .triage import QUESTIONS, is_clear_fine, parse_rules
 from .unlock import UnlockGuard, is_unlock_attempt
+from .voice import ASSISTANT_LINE
 
 log = logging.getLogger("firsthour.incident")
 
@@ -55,6 +56,7 @@ class IncidentMachine:
         profile: dict,
         clock: Callable[[], float] = time.time,
         silence_s: float = 8,
+        playback_grace_s: float = 0,
         hold_s: float = 30,
         emit: Emit = _noop,
         speak: Callable[[str], None] = _noop,
@@ -68,6 +70,10 @@ class IncidentMachine:
         self.profile = profile
         self._clock = clock
         self.silence_s = silence_s
+        # The silence timer starts when the voice reports the question finished playing
+        # (line_played). If that report never comes, it starts this long after queueing,
+        # so a stuck speaker can delay escalation but never stop it.
+        self.playback_grace_s = playback_grace_s
         self.hold_s = hold_s
         self._emit = emit
         self._speak = speak
@@ -78,6 +84,7 @@ class IncidentMachine:
         self._background = background  # runs the StepFun refinement; tests pass a synchronous one
         self.incident: Optional[Incident] = None
         self._question_asked_at = 0.0
+        self._question_heard_at: Optional[float] = None
         # Routes call in from worker threads and tick() from the event loop.
         self._lock = threading.RLock()
 
@@ -133,6 +140,7 @@ class IncidentMachine:
             self.incident = Incident(id=incident_id, device_id=device_id, opened_at=opened_at)
             self.incident.triage = parse_rules([], self.profile)
             self._set(S.CHECKING, "fall_suspected")
+            self._speak(ASSISTANT_LINE)  # the voice says what it is before it asks anything
             self._ask()
             return True
 
@@ -242,6 +250,14 @@ class IncidentMachine:
             if self.incident:
                 self._finish(S.CANCELLED, reason)
 
+    def line_played(self, text: str) -> None:
+        """The voice finished playing `text`. Starts the silence timer for the current question."""
+        with self._lock:
+            inc = self.incident
+            if (inc and inc.state == S.CHECKING and self._question_heard_at is None
+                    and text == self._current_question()):
+                self._question_heard_at = self._clock()
+
     def tick(self) -> None:
         """Called a few times per second by the backend loop."""
         with self._lock:
@@ -249,7 +265,19 @@ class IncidentMachine:
             if not inc:
                 return
             now = self._clock()
-            if inc.state == S.CHECKING and now - self._question_asked_at >= self.silence_s:
+            heard_at = self._question_heard_at
+            if heard_at is None:
+                heard_at = self._question_asked_at + self.playback_grace_s
+            if inc.state == S.CHECKING and now - heard_at >= self.silence_s:
+                if self._question_heard_at is not None:
+                    log.info("silence timer: question finished playing %.1f s after it was queued, "
+                             "then %.1f s of silence before escalating (timer started at playback end) "
+                             "incident_id=%s", self._question_heard_at - self._question_asked_at,
+                             now - self._question_heard_at, inc.id)
+                else:
+                    log.warning("silence timer: voice never reported the question finished; started after "
+                                "the %g s grace, escalating %.1f s after queueing incident_id=%s",
+                                self.playback_grace_s, now - self._question_asked_at, inc.id)
                 inc.question_index = max(inc.question_index, 1)
                 self._escalate(f"no answer for {self.silence_s:g} s")
                 self._ask()
@@ -268,7 +296,7 @@ class IncidentMachine:
     def _ask(self) -> None:
         q = self._current_question()
         if q:
-            self._question_asked_at = self._clock()
+            self._question_asked_at, self._question_heard_at = self._clock(), None
             self._speak(q)
 
     def _emit_triage(self, inc: Incident) -> None:

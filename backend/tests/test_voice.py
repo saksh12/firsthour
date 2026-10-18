@@ -202,6 +202,41 @@ def test_playback_disabled_plays_nothing(voice_factory):
     assert not list(v.cache_dir.glob("*.mp3"))
 
 
+def test_on_played_reports_each_line_after_it_plays(voice_factory):
+    played, reported = [], []
+    v = voice_factory(stub=True, player=lambda argv: played.append(argv[-1]),
+                      on_played=lambda text: reported.append((text, list(played))))
+    v.speak("Are you okay?")
+    assert wait_for(lambda: reported)
+    assert reported == [("Are you okay?", ["Are you okay?"])]  # reported after playing
+
+
+def test_on_played_fires_immediately_when_playback_is_off(voice_factory):
+    reported = []
+    v = voice_factory(playback=False, on_played=reported.append)
+    v.speak("Are you okay?")
+    assert reported == ["Are you okay?"]
+
+
+def test_flush_drops_lines_not_yet_started(voice_factory):
+    gate, played = threading.Event(), []
+
+    def player(argv):
+        played.append(argv[-1])
+        gate.wait(5)
+
+    v = voice_factory(stub=True, player=player)
+    v.speak("first")
+    assert wait_for(lambda: played)  # "first" is playing
+    v.speak("second")
+    v.speak("third")
+    v.flush()
+    gate.set()
+    v.speak("after")
+    assert wait_for(lambda: played[-1:] == ["after"])
+    assert played == ["first", "after"]
+
+
 def test_speak_returns_immediately_when_player_hangs(voice_factory):
     hung = threading.Event()
 
