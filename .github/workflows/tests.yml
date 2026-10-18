@@ -1,7 +1,6 @@
 name: tests
 
-# Runs the backend suite (which also covers edge/) on every push and on every PR,
-# including stacked PRs whose base isn't main.
+# Runs on every push and on every PR, including stacked PRs whose base isn't main.
 on:
   push:
   pull_request:
@@ -15,25 +14,39 @@ concurrency:
 
 jobs:
   pytest:
+    # The backend suite also covers edge/ (both sides of the unlock contract).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"  # AGENTS.md: Python 3.11+
-          # No pip cache: it errors on branches without backend/requirements.txt (main today).
-
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
       - name: Install and run pytest
         env:
           # Tests build their own settings; this only keeps app.main importable.
           SHARED_SECRET: ci-test-secret
         run: |
-          if [ ! -f backend/requirements.txt ] || ! ls backend/tests/test_*.py >/dev/null 2>&1; then
-            echo "No backend tests on this branch yet (main today); nothing to run."
-            exit 0
-          fi
           pip install -r backend/requirements.txt
           cd backend
           python -m pytest -q -p no:warnings
+
+  comms-gateway:
+    # Typechecks against the real Photon SDK, so an API mismatch fails here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: comms-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: comms-gateway/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

@@ -220,7 +220,7 @@ button:disabled { opacity: .5; cursor: default; }
   let localUnlockUntil = 0;
 
   function blank() {
-    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], triage: null };
+    return { state: "IDLE", incidentId: null, reason: "", openedAt: null, answers: [], triage: null, asking: null };
   }
 
   // --- rendering -----------------------------------------------------------
@@ -239,8 +239,8 @@ button:disabled { opacity: .5; cursor: default; }
     $("headline").textContent = s.head;
     $("reason").textContent = view.reason ? reasonText(view.reason) : "";
     $("incident-id").textContent = view.incidentId || "";
-    const next = view.incidentId ? QUESTIONS[view.answers.length] : null;
-    $("asking").textContent = next || (view.incidentId ? "Script finished" : "Nothing");
+    // The backend owns the script position (silence moves it on without an answer).
+    $("asking").textContent = view.asking || (view.incidentId ? "Script finished" : "Nothing");
   }
 
   function reasonText(r) {
@@ -266,14 +266,15 @@ button:disabled { opacity: .5; cursor: default; }
   }
 
   function renderDoor() {
-    const remote = view.state === "UNLOCKED";
-    const local = Date.now() < localUnlockUntil;
-    const open = remote || local;
-    const t = tone(open ? "open" : "idle");
+    // "Unlocked" only once the Pi reports it moved the servo (device_status local_unlock).
+    const open = Date.now() < localUnlockUntil;
+    const sent = !open && view.state === "UNLOCKED";
+    const t = tone(open ? "open" : sent ? "resp" : "idle");
     $("door-panel").style.color = t.color;
-    $("door-state").textContent = open ? "Unlocked" : "Locked";
+    $("door-state").textContent = open ? "Unlocked" : sent ? "Unlocking…" : "Locked";
     $("door-note").textContent = open
-      ? (remote ? "Unlocked by the caregiver. Relocks automatically." : "Unlocked on the device by an enrolled NFC tag.")
+      ? "Unlocked by the caregiver. Relocks automatically."
+      : sent ? "Unlock granted. Waiting for the door to confirm."
       : "Opens only for an enrolled caregiver with the one-time code.";
     $("shackle").setAttribute("d", open ? "M34 44 V30 a14 14 0 0 1 28 0 V22" : "M34 44 V30 a14 14 0 0 1 28 0 V44");
   }
@@ -348,20 +349,15 @@ button:disabled { opacity: .5; cursor: default; }
 
   // --- events (section 6.7) --------------------------------------------------
 
-  function openedAtFromId(id) {
-    // Edge incident ids end in the epoch ms when the Pi opened them: "<device>-<ms>".
-    const m = /-(\d{13})$/.exec(id || "");
-    return m ? Number(m[1]) : null;
-  }
-
   function onSnapshot(d) {
     view = blank();
     view.state = d.state;
     view.incidentId = d.incident_id;
     if (d.incident_id) {
-      view.openedAt = d.opened_at_ms || openedAtFromId(d.incident_id) || Date.now();
+      view.openedAt = d.opened_at_ms || Date.now();
       view.answers = (d.transcript || []).map((x) => x.a);
       view.triage = d.triage || null;
+      view.asking = d.current_question || null;
     }
     log("Connected. State " + d.state + (d.incident_id ? " · " + d.incident_id : ""));
   }
@@ -378,14 +374,16 @@ button:disabled { opacity: .5; cursor: default; }
         if (d.incident_id && d.incident_id !== view.incidentId) {
           view = blank();
           view.incidentId = d.incident_id;
-          view.openedAt = openedAtFromId(d.incident_id) || Date.now();
         }
+        view.openedAt = d.opened_at_ms || view.openedAt || Date.now();
+        view.asking = d.current_question || null;
         view.state = d.state; view.reason = d.reason || "";
         log(`${d.prev || ""}${d.prev ? " → " : ""}${d.state}${d.reason ? " · " + d.reason : ""}`);
         break;
       case "triage_update":
         view.triage = d.triage;
         view.answers = d.transcript || [];
+        view.asking = d.current_question || null;
         log("She said: “" + (view.answers[view.answers.length - 1] || "") + "”");
         break;
       case "message_out":
@@ -457,7 +455,8 @@ button:disabled { opacity: .5; cursor: default; }
     const input = $("answer");
     const text = input.value.trim();
     if (!text) return;
-    if (await post("/person/answer", { text })) input.value = "";
+    input.value = "";  // StepFun can take 3 s; don't make the operator wait to type the next one
+    if (!(await post("/person/answer", { text })) && !input.value) input.value = text;
   });
   $("resolve").addEventListener("click", () => post("/incident/resolve"));
   $("backend-url").textContent = backend;

@@ -47,21 +47,22 @@ export interface ReceivedMessage {
   content: MessageContent;
 }
 
-/** What the gateway forwards to the backend's POST /comms/inbound. */
+/** What the gateway forwards to the backend's POST /comms/inbound (models.InboundMessage). */
 export interface InboundForward {
-  from: string; // caregiver's phone/email (the sender's number -- Q3: yes)
-  body: string; // the reply text
-  platform: string;
-  spaceId: string; // reuse to reply in the same conversation
-  senderId: string; // the agent's user id, used as senderId when replying
-  messageId: string; // reply's parentMessageId + idempotency anchor
+  sender: string; // caregiver's phone/email (sentBy.handle -- Q3: inbound carries it)
+  text: string; // the reply text
+}
+
+/** Where to reply to a caregiver: their space with our agent line. */
+export interface Conversation {
+  spaceId: string;
+  senderId: string; // our agent's user id in that space
 }
 
 /** Body for photon.projects.sendMessage(...). */
 export interface SendBody {
   spaceId: string;
   senderId: string;
-  parentMessageId?: string;
   content: TextContent;
 }
 
@@ -96,28 +97,18 @@ export function isCaregiverReply(msg: ReceivedMessage, agentHandle: string): boo
 export function toBackendInbound(msg: ReceivedMessage): InboundForward {
   const text = extractPlainText(msg.content);
   if (text === null) throw new Error("message has no plain text to forward");
-  if (!msg.receivedBy) throw new Error("message has no receivedBy agent");
-  return {
-    from: msg.sentBy.handle,
-    body: text,
-    platform: msg.platform,
-    spaceId: msg.space.id,
-    senderId: msg.receivedBy.id,
-    messageId: msg.id,
-  };
+  return { sender: msg.sentBy.handle, text };
 }
 
-export function buildSendBody(input: {
-  spaceId: string;
-  senderId: string;
-  parentMessageId?: string;
-  text: string;
-}): SendBody {
-  const body: SendBody = {
+export function conversationOf(msg: ReceivedMessage): Conversation {
+  if (!msg.receivedBy) throw new Error("message has no receivedBy agent");
+  return { spaceId: msg.space.id, senderId: msg.receivedBy.id };
+}
+
+export function buildSendBody(input: Conversation & { text: string }): SendBody {
+  return {
     spaceId: input.spaceId,
     senderId: input.senderId,
     content: { type: "text", format: "plain", text: input.text },
   };
-  if (input.parentMessageId) body.parentMessageId = input.parentMessageId;
-  return body;
 }

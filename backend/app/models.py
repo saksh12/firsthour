@@ -12,7 +12,7 @@ from pydantic import AliasChoices, BaseModel, Field
 # --- 6.2 Edge to backend -----------------------------------------------------
 
 EdgeEventType = Literal[
-    "fall_suspected", "heartbeat", "help_button", "nfc_tap", "local_unlock", "cancelled"
+    "fall_suspected", "heartbeat", "help_button", "local_unlock", "cancelled"
 ]
 
 

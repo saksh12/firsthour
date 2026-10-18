@@ -98,10 +98,33 @@ def test_help_button_escalates(m):
     assert m.state == S.ALERTING
 
 
-def test_second_fall_during_incident_is_ignored(m):
+def test_same_fall_twice_is_ignored(m):
     m.on_fall("bath-01", "inc-1")
-    assert not m.on_fall("bath-01", "inc-2")
+    assert not m.on_fall("bath-01", "inc-1")
+    assert not m.on_fall("other-device", "other-1")
     assert m.incident.id == "inc-1"
+
+
+def test_new_fall_from_the_pi_supersedes_the_stale_incident(m, rec):
+    closed = []
+    m._on_close = lambda inc, final: closed.append((inc.id, final))
+    m.on_fall("bath-01", "inc-1")
+    m.on_answer("help")
+    code = code_from(rec.alerts[0])
+    assert m.on_fall("bath-01", "inc-2")
+    assert m.incident.id == "inc-2" and m.state == S.CHECKING
+    assert closed == [("inc-1", S.RESOLVED)]
+    assert m.caregiver_reply(CAREGIVER, f"UNLOCK {code}")["reason"] == "no active incident"
+
+
+def test_time_down_counts_from_the_pi_detection_time(m, clock):
+    m.on_fall("bath-01", "inc-1", ts_ms=clock.ms() - 90_000)  # replayed from the offline outbox
+    assert m.snapshot()["down_s"] == 90
+
+
+def test_implausible_edge_clock_falls_back_to_receive_time(m, clock):
+    m.on_fall("bath-01", "inc-1", ts_ms=0)  # a Pi with no RTC and no NTP boots in 1970
+    assert m.snapshot()["down_s"] == 0
 
 
 def test_later_answers_update_triage_and_walk_the_script(m, rec):
@@ -203,3 +226,57 @@ def test_new_incident_after_resolve_works(m, rec):
     m.resolve()
     assert m.on_fall("bath-01", "inc-2")
     assert m.state == S.CHECKING
+
+
+# Issue #13 bug 5: StepFun can take 3 s. The flow must not wait on it, and tick() must
+# not race it.
+def slow_machine(clock, rec, gate, calls):
+    from app.models import TriageRecord
+
+    def slow_triage(answers, profile):
+        calls.append(len(answers))
+        gate.wait(5)
+        return TriageRecord(conscious=True, summary=f"model saw {len(answers)} answers")
+
+    guard = UnlockGuard(allowed=[CAREGIVER], clock=clock)
+    return IncidentMachine(guard, DEMO_PROFILE, clock=clock, silence_s=8, emit=rec.emit,
+                           speak=rec.spoken.append, send_alert=lambda i, t: rec.alerts.append(t),
+                           triage_fn=slow_triage)
+
+
+def test_slow_triage_does_not_delay_the_alert_or_race_the_silence_timer(clock, rec):
+    import threading
+
+    gate, calls = threading.Event(), []
+    m = slow_machine(clock, rec, gate, calls)
+    m.on_fall("bath-01", "inc-1")
+    clock.advance(7)
+    t = threading.Thread(target=m.on_answer, args=("help, I fell",))
+    t.start()
+    while not calls:
+        pass
+    # The answer escalated before the model was called.
+    assert m.state == S.ALERTING and len(rec.alerts) == 1
+    clock.advance(3)  # past the 8 s silence deadline while StepFun is still thinking
+    m.tick()
+    gate.set()
+    t.join()
+    assert len(rec.alerts) == 1
+    assert rec.spoken.count(QUESTIONS[1][1]) == 1
+    assert m.snapshot()["triage"]["summary"] == "model saw 1 answers"
+
+
+def test_stale_triage_result_is_not_applied(clock, rec):
+    import threading
+
+    gate, calls = threading.Event(), []
+    m = slow_machine(clock, rec, gate, calls)
+    m.on_fall("bath-01", "inc-1")
+    t = threading.Thread(target=m.on_answer, args=("help",))
+    t.start()
+    while not calls:
+        pass
+    m.resolve()  # incident ends while the model is thinking
+    gate.set()
+    t.join()
+    assert m.incident is None

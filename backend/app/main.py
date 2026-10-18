@@ -1,13 +1,14 @@
 """FastAPI app: /health, the edge contract, the person's answers, caregiver inbound,
 and the dashboard WebSocket (section 6.7).
 
-TODO(phase 1, C): voice.py replaces `speak`; comms-gateway replaces the stub outbox.
+TODO(phase 1, C): voice.py replaces `speak`.
 """
 
 import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -25,7 +26,7 @@ from .models import CommandsResponse, DashboardEvent, EdgeEvent, InboundMessage
 from .profile import DEMO_PROFILE
 from .security import ReplayCache, make_command, verify_event, verify_inbound
 from .telemetry import Telemetry
-from .triage import StepFun
+from .triage import StepFun, urllib_transport
 from .unlock import UnlockGuard
 
 log = logging.getLogger("firsthour.api")
@@ -47,6 +48,7 @@ def load_settings() -> dict:
     return {
         "STUB_EDGE": os.getenv("STUB_EDGE", "1") == "1",
         "STUB_PHOTON": os.getenv("STUB_PHOTON", "1") == "1",
+        "COMMS_GATEWAY_URL": os.getenv("COMMS_GATEWAY_URL", "http://localhost:8787"),
         "SHARED_SECRET": os.environ.get("SHARED_SECRET", ""),
         "CAREGIVER_NUMBERS": os.getenv("CAREGIVER_NUMBERS", ""),
         "INCIDENT_WINDOW_SECONDS": int(os.getenv("INCIDENT_WINDOW_SECONDS", "600")),
@@ -71,7 +73,7 @@ def parse_origins(value: str) -> list[str]:
 
 def create_app(settings: Optional[dict] = None) -> FastAPI:
     s = {"STUB_PHOTON": True, "UNLOCK_HOLD_SECONDS": 30, "CORS_ORIGINS": DEFAULT_CORS_ORIGINS,
-         **(settings or load_settings())}
+         "COMMS_GATEWAY_URL": "http://localhost:8787", **(settings or load_settings())}
     origins = parse_origins(s["CORS_ORIGINS"])
     secret = s["SHARED_SECRET"]
     if not secret:
@@ -121,13 +123,24 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         spoken.append(text)
         log.info("say %r", text)
 
+    def deliver(incident_id: str, to: list[str], text: str) -> None:
+        with telemetry.span(incident_id, "photon_send", stub=False):
+            for number in to:
+                try:
+                    r = urllib_transport(s["COMMS_GATEWAY_URL"].rstrip("/") + "/send", {},
+                                         {"to": number, "body": text}, 10)
+                    log.info("alert delivered incident_id=%s to=%s id=%s", incident_id, number, r.get("id"))
+                except (OSError, ValueError) as e:  # HTTPError is an OSError
+                    log.error("alert not delivered incident_id=%s to=%s error=%s", incident_id, number, e)
+
     def send_alert(incident_id: str, text: str) -> None:
         to = sorted(guard.allowed)
         if s["STUB_PHOTON"]:
-            outbox.append({"to": to, "incident_id": incident_id, "text": text, "ts": int(time.time() * 1000)})
+            with telemetry.span(incident_id, "photon_send", stub=True):
+                outbox.append({"to": to, "incident_id": incident_id, "text": text, "ts": int(time.time() * 1000)})
         else:
-            # TODO(C): POST to comms-gateway. Until then the simulator page is the path.
-            log.error("STUB_PHOTON=0 but comms-gateway is not wired yet incident_id=%s", incident_id)
+            # Off the incident lock and the event loop: a slow gateway must not stall the flow.
+            threading.Thread(target=deliver, args=(incident_id, to, text), daemon=True).start()
         # The dashboard gets that an alert went out, not its text: the text carries the code.
         emit("message_out", {"to": to, "incident_id": incident_id, "kind": "alert"})
         log.info("alert sent incident_id=%s to=%s stub=%s", incident_id, to, s["STUB_PHOTON"])
@@ -163,7 +176,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     log.info("triage: %s", f"StepFun {stepfun.model} with rule fallback" if stepfun.enabled else "rules only")
     machine = IncidentMachine(guard, DEMO_PROFILE, hold_s=s["UNLOCK_HOLD_SECONDS"],
                               emit=emit, on_close=close_on_pi, speak=speak,
-                              send_alert=telemetry.wrap("photon_send", send_alert, current_incident_id),
+                              send_alert=send_alert,
                               triage_fn=telemetry.wrap("stepfun_triage", stepfun.triage, current_incident_id),
                               rewrite_fn=stepfun.rewrite)
 
@@ -227,7 +240,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             emit("device_status", {"device_id": event.device_id, "event": event.type})
 
         if event.type == "fall_suspected":
-            machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}")
+            machine.on_fall(event.device_id, event.local_incident_id or f"{event.device_id}-{event.ts}", event.ts)
             sensors = event.sensors.model_dump()
             with telemetry.span(current_incident_id(), "sensor_event", **sensors,
                                 edge_to_backend_ms=int(time.time() * 1000) - event.ts):
@@ -236,7 +249,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             machine.on_help_button()
         elif event.type == "cancelled":
             machine.cancel("cancelled on device")
-        # nfc_tap / local_unlock: the Pi already decided; we only log and show them.
+        # local_unlock: the Pi opened the latch; we only log and show it.
         inc = machine.incident
         return {"ok": True, "incident_id": inc.id if inc else None, "state": machine.state.value}
 

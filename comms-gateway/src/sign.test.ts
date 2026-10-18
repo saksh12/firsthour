@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Config } from "./config.js";
 import { signBody, signHeaders } from "./sign.js";
 import { forwardInbound } from "./server.js";
 
@@ -30,6 +31,16 @@ describe("signHeaders", () => {
 describe("forwardInbound", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  function cfg(sharedSecret: string): Config {
+    return {
+      port: 8787,
+      stubPhoton: true,
+      backendUrl: "http://backend/",
+      sharedSecret,
+      photon: { token: "", projectId: "", agentHandle: "" },
+    };
+  }
+
   function captureFetch(): Array<{ url: string; init: RequestInit }> {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal("fetch", async (url: string | URL, init: RequestInit) => {
@@ -41,7 +52,7 @@ describe("forwardInbound", () => {
 
   it("sends X-Signature/X-Timestamp when SHARED_SECRET is set", async () => {
     const calls = captureFetch();
-    await forwardInbound("http://backend/", "s3cr3t", { from: "+1", body: "hi" });
+    await forwardInbound(cfg("s3cr3t"), { sender: "+1", text: "hi" });
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers["x-signature"]).toMatch(/^[0-9a-f]{64}$/);
     expect(Number(headers["x-timestamp"])).toBeGreaterThan(0);
@@ -50,7 +61,7 @@ describe("forwardInbound", () => {
 
   it("sends unsigned when the secret is empty (stub-mode path)", async () => {
     const calls = captureFetch();
-    await forwardInbound("http://backend/", "", { from: "+1", body: "hi" });
+    await forwardInbound(cfg(""), { sender: "+1", text: "hi" });
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers["x-signature"]).toBeUndefined();
     expect(headers["x-timestamp"]).toBeUndefined();

@@ -32,7 +32,6 @@ def _f(key, default):
 DEVICE_ID = os.getenv("DEVICE_ID", "bath-01")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")  # on the Pi: the laptop's LAN IP
 SHARED_SECRET = os.getenv("SHARED_SECRET", "")
-NFC_ALLOWED_UIDS = os.getenv("NFC_ALLOWED_UIDS", "")
 SERIAL_PORT = os.getenv("SERIAL_PORT", "")  # TODO(verify): device path on QNX
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "115200"))
 

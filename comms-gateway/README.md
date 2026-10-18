@@ -11,40 +11,41 @@ Docs: <https://photon.codes/docs/beta/get-started/imessage>
 ```bash
 cd comms-gateway
 npm install
-npm run dev        # starts on :8787
+npm run dev        # starts on 127.0.0.1:8787, loads the root .env
 ```
 
-Reads the shared root `.env`. In stub mode it needs no keys and no network.
+Node 22+ (Photon's SDK requires it). In stub mode it needs no keys and no network.
 
 | Endpoint | What it does |
 | --- | --- |
 | `GET /health` | `{ ok, stub }` |
-| `POST /send` `{ to, body, spaceId?, senderId?, parentMessageId? }` | Sends via Photon; stub records to an in-memory outbox |
-| `POST /inbound` (a Photon received-message, or `{ from, body }`) | Forwards to the backend's `POST /comms/inbound` |
+| `POST /send` `{ to, body }` | Sends via Photon in `to`'s conversation with the agent line; stub records to an in-memory outbox. `409` if `to` hasn't texted the line yet |
 
-In the live path a background poller also pulls received iMessages every 2s and
-forwards caregiver replies to the backend, so a public webhook is optional.
+Inbound: in the live path a poller pulls received iMessages every 2 s and forwards
+caregiver replies to the backend's `POST /comms/inbound` as `{ sender, text }`, with
+`Authorization: Bearer $SHARED_SECRET` (the backend refuses inbound without it when
+`STUB_PHOTON=0`). The gateway listens on localhost only.
+
+The backend calls `/send` itself when `STUB_PHOTON=0` (`COMMS_GATEWAY_URL`).
 
 ## Stub vs. live
 
-- `STUB_PHOTON=1` (default): no SDK, no creds, no network. `/send` writes to an
-  outbox and returns a fake id; the poller never starts. The dashboard
-  **caregiver simulator** page drives inbound for the demo.
-- `STUB_PHOTON=0`: lazy-loads `@photon-ai/api` and uses the real API. Needs
-  `PHOTON_TOKEN`, `PHOTON_PROJECT_ID`, `PHOTON_AGENT_HANDLE` in `.env`.
+- `STUB_PHOTON=1` (default): no creds, no network. The backend never calls the
+  gateway; the **caregiver simulator** page (`dashboard/caregiver-simulator.html`)
+  plays the caregiver's phone.
+- `STUB_PHOTON=0`: real API through `@photon-ai/api` (pinned exactly: the Beta API
+  changes between releases). Needs `PHOTON_TOKEN`, `PHOTON_PROJECT_ID`,
+  `PHOTON_AGENT_HANDLE` in `.env`.
 
-## ⚠️ Open question for the Photon table (Q3)
+## Open question for the Photon table (Q3)
 
-A **shared** iMessage line **cannot send an unsolicited first message** — the
-caregiver must message the agent line first. A fall alert wants to text the
-caregiver *first*, so before we rely on this end to end we must confirm whether
-a **dedicated line** (or another mechanism) allows outbound-first alerts.
-Until that's confirmed, the demo path is: caregiver texts the agent once →
-we can then alert + reply in that conversation, with the simulator as fallback.
-`TODO(verify)` — marked in `src/photon.ts`.
+A **shared** iMessage line **cannot send the first message**
+(`SHARED_LINE_INBOUND_REQUIRED`). Demo path: the caregiver texts the agent line
+once before the demo; the gateway remembers that conversation and the alert is
+sent into it. Ask the table whether a **dedicated line** lets us text first.
+`TODO(verify)`, marked in `src/photon.ts`.
 
-Inbound replies **do** carry the sender's number (`sentBy.handle`, E.164), which
-answers the other half of Q3.
+Inbound replies **do** carry the sender's number (`sentBy.handle`, E.164).
 
 ## Tests
 

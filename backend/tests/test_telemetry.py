@@ -107,7 +107,9 @@ def test_full_incident_is_one_trace_with_every_stage(cap, monkeypatch):
 
     # Nothing sent to Sentry (traces, request transactions, logs) carries the code or a phone number.
     everything = cap.raw()
-    assert "4821" not in everything
+    # As a token: float timestamps and hex ids contain "4821" by chance (seen in CI: 1792282806.4548218).
+    leak = re.search(r"(?<![\w.])4821(?![\w.])", everything)
+    assert not leak, everything[max(0, leak.start() - 120):leak.end() + 40]
     assert CAREGIVER not in everything and STRANGER not in everything
     assert "+***0101" in everything                # still readable as "the caregiver"
 

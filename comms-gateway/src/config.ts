@@ -9,12 +9,11 @@ export interface Config {
     token: string; // PHOTON_TOKEN  (project API key, pho_sk_...)
     projectId: string; // PHOTON_PROJECT_ID (pho_prj_...)
     agentHandle: string; // PHOTON_AGENT_HANDLE (the assigned line, E.164)
-    baseUrl: string; // PHOTON_SERVER_ADDRESS, default api.photon.codes/v1
   };
 }
 
 function env(name: string, fallback = ""): string {
-  return process.env[name]?.trim() ?? fallback;
+  return process.env[name]?.trim() || fallback;
 }
 
 export function loadConfig(): Config {
@@ -28,7 +27,6 @@ export function loadConfig(): Config {
       token: env("PHOTON_TOKEN"),
       projectId: env("PHOTON_PROJECT_ID"),
       agentHandle: env("PHOTON_AGENT_HANDLE"),
-      baseUrl: env("PHOTON_SERVER_ADDRESS", "https://api.photon.codes/v1"),
     },
   };
 }

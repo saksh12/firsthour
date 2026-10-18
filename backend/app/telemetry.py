@@ -14,7 +14,7 @@ bodies are never attached (a caregiver's reply can contain the unlock code), a
 neutral server_name, and every log/event is scrubbed of "UNLOCK <4 digits>" and
 phone numbers (last 4 digits kept so the audit trail is still readable).
 
-SDK calls checked against sentry-sdk 2.72.0 (pinned in requirements.txt).
+SDK calls checked against sentry-sdk 2.71.0 (pinned in requirements.txt).
 """
 
 import logging

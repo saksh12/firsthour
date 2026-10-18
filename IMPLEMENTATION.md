@@ -17,7 +17,7 @@
 2. asks "are you okay?" out loud in a calm, familiar synthetic voice,
 3. runs a short scripted triage (head hit? pain where? can you move?),
 4. texts a caregiver a clear summary and lets them reply,
-5. unlocks the front door (a servo prop) only if strict rules pass.
+5. unlocks the front door (a simulated latch: no servo at the event) only if strict rules pass.
 
 **Non-negotiables (tape these to the table):**
 
@@ -42,10 +42,9 @@ Everything in this guide serves these. If a task does not help one of them, it w
 | M1 | The thud | Drop on the mat. Display flips to `TIME DOWN 00:01`. Terminal shows both sensors spiking. | QNX Pi, accelerometer, sound sensor |
 | M2 | The voice | A calm voice asks if the person is okay. Teammate answers. A short triage follows. | ElevenLabs, StepFun |
 | M3 | The text | Caregiver phone buzzes with a triage card. Caregiver replies. Reply is read aloud to the person on the floor. | Photon, StepFun |
-| M4 | The door | Caregiver replies `UNLOCK <code>`. Servo clicks the latch open. A stranger's text is refused. | Rules + signed command + Arduino servo |
-| M5 | The offline test | Unplug Wi-Fi. The box still alarms, shows the clock, and unlocks on an NFC tag tap. | QNX local logic, NFC |
+| M4 | The door | Caregiver replies `UNLOCK <code>`. The simulated latch opens (Pi confirms, Mac shows it). A stranger's text is refused. | Rules + signed command + Pi confirmation |
+| M5 | The offline test | Unplug Wi-Fi. The box still alarms and shows the clock; the door stays locked; the Pi replays its log on reconnect. | QNX local logic |
 
-Bonus if time allows: paramedic NFC tap opens the handoff sheet on a phone or laptop.
 
 ---
 
@@ -61,7 +60,7 @@ We assumed these. **Each one needs an owner to confirm it.** Cross them off here
 | Q4 | StepFun base URL for our key | Docs disagree between `api.stepfun.com/v1` and `api.stepfun.ai/v1`. Use whichever matches the key. | Backend lead | 2:30 PM |
 | Q5 | ElevenLabs: is voice cloning available on our tier? Realtime speech-to-text? | Maybe not. Fallback is a stock voice. | Comms lead | 2:30 PM |
 | Q6 | Sentry Uptime Monitoring needs a public URL | We expose `/health` through a tunnel (ngrok or cloudflared) | Frontend/Sentry | 4:00 PM |
-| Q7 | Arduino model, Grove shield, accelerometer chip, NFC board type, which NFC tags we get | Unknown. Read the module labels. | Edge lead | 2:30 PM |
+| Q7 | Arduino model, Grove shield, accelerometer chip (no NFC reader, no servo: decided) | Unknown. Read the module labels. | Edge lead | 2:30 PM |
 | Q8 | Paper or Base44? | Pick one after reading both challenge pages. Do not chase both. | Frontend | 3:00 PM |
 | Q9 | Who plays the "caregiver" phone? | A teammate's phone, enrolled in the allowlist. Judges can hold it. | All | before demo |
 | Q10 | Are there extra sponsor submission forms? | Check each challenge's "View Additional Information" page. | Frontend | 5:00 PM |
@@ -77,8 +76,8 @@ We assumed these. **Each one needs an owner to confirm it.** Cross them off here
  │  sound sensor         │  lines/JSON  │  fall detection (fusion)       │
  │  accelerometer        │              │  local alarm + display state   │
  │  ultrasonic (floor)   │              │  verifies SIGNED commands      │
- │  NFC board            │              │  offline NFC unlock            │
- │  servo (door latch)   │              │  heartbeat to backend          │
+ │  latch LED (simulated)│              │  reports local_unlock          │
+ │                       │              │  heartbeat to backend          │
  │  buzzer / LED / LCD   │              └──────────────┬─────────────────┘
  └───────────────────────┘                     HTTP over local Wi-Fi
                                                        │ events up, commands polled down
@@ -125,7 +124,7 @@ firsthour/
 ├── IMPLEMENTATION.md
 ├── .env.example
 ├── arduino/
-│   └── hub/hub.ino            # sensors + servo + NFC + buzzer
+│   └── hub/hub.ino            # sensors + simulated latch + buzzer
 ├── edge/                      # runs on the Pi (QNX), plain Python
 │   ├── sensor_node.py         # serial reader, fusion, event posting, command polling
 │   ├── security.py            # HMAC verify, nonce cache
@@ -169,7 +168,7 @@ cd comms-gateway && npm install && npm run dev
 cd dashboard && npm install && npm run dev
 ```
 
-**`.env.example`:** see the file in the repo root (stub switches, StepFun, ElevenLabs, Photon, Sentry, `SHARED_SECRET`, `CAREGIVER_NUMBERS`, `NFC_ALLOWED_UIDS`, `INCIDENT_WINDOW_SECONDS=600`, `UNLOCK_HOLD_SECONDS=30`).
+**`.env.example`:** see the file in the repo root (stub switches, StepFun, ElevenLabs, Photon, Sentry, `SHARED_SECRET`, `CAREGIVER_NUMBERS`, `INCIDENT_WINDOW_SECONDS=600`, `UNLOCK_HOLD_SECONDS=30`).
 
 ---
 
@@ -177,7 +176,7 @@ cd dashboard && npm install && npm run dev
 
 | Role | Owns | Folders |
 | --- | --- | --- |
-| **A: Edge lead** | QNX boot, Arduino sketch, sensors, servo, NFC, fusion logic, lock prop | `arduino/`, `edge/` |
+| **A: Edge lead** | QNX boot, Arduino sketch, sensors, simulated latch, fusion logic | `arduino/`, `edge/` |
 | **B: Backend lead** | State machine, StepFun triage, unlock rules, signing, tests | `backend/` |
 | **C: Comms and voice lead** | ElevenLabs, speech input, Photon gateway, caregiver simulator | `comms-gateway/`, `backend/app/voice.py`, `backend/app/comms.py` |
 | **D: Frontend, Sentry, pitch lead** | Dashboard, Sentry setup and story, Devpost, demo video, judge Q&A | `dashboard/`, `docs/`, `backend/app/telemetry.py` |
@@ -198,7 +197,6 @@ Arduino sends:
 
 ```text
 S,<ms>,<soundPeak>,<ax>,<ay>,<az>,<distCm>      # sensor sample, 20 per second
-N,<uidHex>                                      # NFC tag seen
 B                                               # help button pressed (if wired)
 ACK,<cmd>                                       # reply to a command
 ```
@@ -206,7 +204,7 @@ ACK,<cmd>                                       # reply to a command
 Pi sends:
 
 ```text
-U          # unlock (servo to UNLOCK_DEG, auto relock after hold time)
+U          # unlock the simulated latch (LED on, ACK,U, auto relock after hold time)
 L          # lock now
 A1 / A0    # buzzer on / off
 D,<text>   # show short text on LCD/segment display
@@ -226,7 +224,7 @@ D,<text>   # show short text on LCD/segment display
 }
 ```
 
-`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `nfc_tap`, `local_unlock`, `cancelled`.
+`type` is one of: `fall_suspected`, `heartbeat`, `help_button`, `local_unlock` (the Pi opened the latch), `cancelled`.
 
 Header: `X-Signature: hex(HMAC_SHA256(SHARED_SECRET, ts + "." + raw_body))`.
 
@@ -342,9 +340,9 @@ Times are for Saturday/Sunday. Each phase ends with an **acceptance test**. Do n
 2. Agree on roles (section 5). Put your name next to each question in section 2.
 
 **A: Edge lead**
-3. Go to the hardware lab. Collect: Raspberry Pi kit, Arduino kit, servo, sound sensor, 3-axis accelerometer, ultrasonic sensor, NFC/RFID board, buzzer, LCD or segment display, LED kit, Logitech webcam (used as a microphone), breadboard, jumper wires.
+3. Go to the hardware lab. Collect: Raspberry Pi kit, Arduino kit, sound sensor, 3-axis accelerometer, ultrasonic sensor, buzzer, LCD or segment display, LED kit, Logitech webcam (used as a microphone), breadboard, jumper wires.
 4. Collect craft supplies: cardboard, tape, popsicle sticks, rubber bands, zip ties.
-5. Read the module labels and note the accelerometer chip and NFC board type. Ask the hardware volunteers whether a Grove base shield comes with the Arduino.
+5. Read the module labels and note the accelerometer chip. Ask the hardware volunteers whether a Grove base shield comes with the Arduino.
 6. Go to the QNX table. Ask: which board image, how to flash, which `oss.qnx.com` AI modules work on it, and how audio capture works.
 
 **B: Backend lead**
@@ -390,12 +388,11 @@ Times are for Saturday/Sunday. Each phase ends with an **acceptance test**. Do n
 
 **A: Edge lead, in this exact order. Stop and fix each step before the next.**
 
-1. **Servo test, no QNX, no Pi.** Wire servo to Arduino (red to 5V, black or brown to GND, signal to pin 9). Upload the sketch in section 8. Type `U` in the Serial Monitor. The servo must move. Tune `LOCK_DEG` and `UNLOCK_DEG`.
-2. **Build the lock prop** (cardboard door, hinge of tape, popsicle-stick latch on the servo horn, rubber band to pull the door open). Test 10 unlocks in a row.
+1. **Latch test, no QNX, no Pi.** Upload the sketch in section 8.2. Type `U` in the Serial Monitor: the latch LED lights, `ACK,U` comes back, and it relocks after the hold time.
+2. (No servo, so no lock prop. The Mac dashboard shows the door.)
 3. **Sound sensor.** Print the peak value at 20 Hz. Clap, drop a beanbag, drop a bottle, walk. Note the numbers.
 4. **Accelerometer.** Tape it flat on the mat. Use the library named on the module's wiki page. Print x, y, z. Drop the beanbag next to it.
 5. **Ultrasonic.** Aim it across the floor at body height. Print distance. Lie a teammate's legs in front of it. Note the readings.
-6. **NFC.** Read a tag UID and print it. Write down the UIDs of the tags you will enroll.
 7. **Buzzer and display.** Text on the display, buzzer on and off by command.
 8. **QNX.** Flash the image, get a shell over serial or SSH, run `python3` (or whichever runtime QNX provides), and read the Arduino serial port from a script.
 9. **Edge script.** Put the fusion logic from section 10 into `sensor_node.py`. Test it first on the laptop with `sim_sensors.py`.
@@ -427,17 +424,17 @@ Replace stubs one at a time. After each, rerun the Phase 1 acceptance test.
 5. **Sentry (D).** Initialize Sentry in the backend. Add spans for each stage (section 12). Create the uptime monitor on the tunneled `/health` endpoint.
 6. **Local alarm on the Pi (A).** On fall, the Pi turns on the buzzer and shows `TIME DOWN` even if the backend is unreachable.
 
-**Acceptance:** drop the beanbag, hear the voice, receive the real text on a real phone, send `UNLOCK <code>`, and watch the servo click.
+**Acceptance:** drop the beanbag, hear the voice, receive the real text on a real phone, send `UNLOCK <code>`, and watch the door open on the Mac once the Pi confirms.
 
 ### Phase 4: Hardening (10:30 PM to 1:30 AM)
 
 1. **Security tests (B).** Run every case in section 9. All must pass.
-2. **Offline test (A).** Turn off Wi-Fi mid-incident. Confirm: alarm stays on, display keeps counting, an enrolled NFC tag unlocks, an unknown tag does not, and everything logs locally. Reconnect and confirm the Pi syncs the local events to the backend.
+2. **Offline test (A).** Turn off Wi-Fi mid-incident. Confirm: alarm stays on, display keeps counting, the door stays locked, and everything logs locally. Reconnect and confirm the Pi syncs the local events to the backend.
 3. **Thresholds (A).** Run the calibration in section 10. Commit the final numbers.
 4. **False-alarm check (A).** Do 20 non-falls (bottle drop, door slam, footsteps, dropping a book). Record how many trigger the voice check. Report the real number, whatever it is.
 5. **Dashboard polish (D).** Big type, high contrast, no clutter. Add the paramedic handoff sheet page. Make a phone-sized view.
 6. **Sentry story (D).** Write down one real thing Sentry helped you find (a slow call in a trace, a failure in the logs). Put it in `docs/sentry-story.md` while you remember it.
-7. **Demo reset (C).** `scripts/demo_reset.sh` must return everything to `IDLE` in one command, including relocking the servo.
+7. **Demo reset (C).** `scripts/demo_reset.sh` must return everything to `IDLE` in one command, including relocking the latch.
 
 **Acceptance:** run the full demo three times in a row with no manual fixes.
 
@@ -470,35 +467,23 @@ Set up at your table. Run the demo once for yourselves. Keep the video ready on 
 
 | Part | Connects to | Notes |
 | --- | --- | --- |
-| Servo | red to 5V, brown or black to GND, signal to **D9** | If it jitters or the Arduino resets, power the servo from a separate 5V source and join the grounds |
+| Latch LED (simulated latch) | LED + 220 Ω resistor on **D9** | Optional: the Mac dashboard shows the door either way |
 | Sound sensor (analog) | **A0** | Needs an analog pin, which is why the Arduino reads it, not the Pi |
 | 3-axis accelerometer | I2C (SDA/SCL) | Tape flat on the mat. Use the library named on the module's wiki page |
 | Ultrasonic | **D7** (single signal pin on Grove) | Aim across the floor at body height |
-| NFC/RFID board | I2C or UART, depending on the board | Check the label. If I2C, it shares the bus with the accelerometer (different addresses) |
 | Buzzer | **D5** | |
 | LED socket | **D6** | Red = locked, green = unlocked, or breathing green when idle |
 | Display (LCD or 4-digit) | I2C or its own pins | Shows `TIME DOWN mm:ss` |
 | Help button (optional) | **D4** | Gives a non-speech way to respond |
 
-### 8.2 Lock prop (swinging latch, "Option B")
-
-1. Push a plastic horn onto the servo shaft. Tape or glue a popsicle stick to the horn so it sticks out like a clock hand.
-2. Tape the servo next to the door's loose edge (the side away from the hinge). The stick lies **in front of** the door edge with a finger-width gap, so the door cannot swing out.
-3. At `LOCK_DEG` (0) the stick blocks the door. At `UNLOCK_DEG` (90) it points away, clear of the door.
-4. Hinge the door with a strip of tape. Add a rubber band that pulls the door open once the stick moves. That pop is your demo moment.
-5. Keep a small gap while locked. If the door presses hard on the stick, the servo can stall or buzz.
-
-### 8.3 Arduino sketch (`arduino/hub/hub.ino`)
+### 8.2 Arduino sketch (`arduino/hub/hub.ino`)
 
 ```cpp
-#include <Servo.h>
-
-const int PIN_SERVO = 9, PIN_BUZZER = 5, PIN_ULTRA = 7, PIN_SOUND = A0;
-const int LOCK_DEG = 0, UNLOCK_DEG = 90;
+// No servo at the event: the latch is simulated by an LED and the relock timer.
+const int PIN_LATCH = 9, PIN_BUZZER = 5, PIN_ULTRA = 7, PIN_SOUND = A0;
 const unsigned long HOLD_MS = 30000;   // auto relock
 const unsigned long SAMPLE_MS = 50;    // 20 samples per second
 
-Servo bolt;
 unsigned long relockAt = 0, nextSample = 0;
 bool unlocked = false;
 float baseline = 512;
@@ -519,8 +504,8 @@ void readAccel(float &ax, float &ay, float &az) {
   ax = ay = az = 0;  // TODO: use the library named on the module's wiki page
 }
 
-void lockNow()   { bolt.write(LOCK_DEG);   unlocked = false; }
-void unlockNow() { bolt.write(UNLOCK_DEG); unlocked = true; relockAt = millis() + HOLD_MS; }
+void lockNow()   { digitalWrite(PIN_LATCH, LOW);  unlocked = false; }
+void unlockNow() { digitalWrite(PIN_LATCH, HIGH); unlocked = true; relockAt = millis() + HOLD_MS; }
 
 void handleLine(String s) {
   s.trim();
@@ -534,7 +519,7 @@ void handleLine(String s) {
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BUZZER, OUTPUT);
-  bolt.attach(PIN_SERVO);
+  pinMode(PIN_LATCH, OUTPUT);
   lockNow();
 }
 
@@ -561,11 +546,10 @@ void loop() {
     Serial.print(","); Serial.println(readDistanceCm());
     soundPeak = 0;
   }
-  // NFC: when a tag is read, Serial.print("N,"); Serial.println(uidHex);
 }
 ```
 
-**Test it alone first:** open the Arduino Serial Monitor at 115200, type `U`, press Enter. The servo should move and relock after 30 seconds. Do not touch anything else until this works.
+**Test it alone first:** open the Arduino Serial Monitor at 115200, type `U`, press Enter. The latch LED should light, `ACK,U` should print, and it should relock after 30 seconds. Do not touch anything else until this works.
 
 ---
 
@@ -580,7 +564,7 @@ The unlock is the part judges will poke at. Build it carefully and test it hard.
 3. **The reply contains the one-time code** from the alert text. A fresh 4-digit code is made for each incident and dies when it ends.
 4. **Fewer than 3 wrong tries** in this incident.
 5. **The command is signed**, fresh (under 10 seconds), and its nonce is new.
-6. **The Pi agrees** that a local incident is open before it moves the servo.
+6. **The Pi agrees**: the command names its own open incident, before it opens the latch.
 7. **Every attempt is logged** (allowed or refused, with the reason).
 8. **Auto relock** after `UNLOCK_HOLD_SECONDS`.
 
@@ -649,13 +633,10 @@ def valid_command(cmd, secret, local_incident_open):
 | 7 | Command replayed (same nonce) | Pi refuses: replay |
 | 8 | Command older than 10 s | Pi refuses: stale |
 | 9 | Command with wrong signature | Pi refuses |
-| 10 | Unknown NFC tag during an incident | Refused |
-| 11 | Enrolled NFC tag during an incident | Unlock |
-| 12 | Enrolled NFC tag with no incident | Refused |
-| 13 | Relock after hold time | Servo returns to `LOCK_DEG` |
+| 10 | Relock after hold time | Latch relocks (Arduino) |
 | 14 | Every case above | A log line with the reason |
 
-**Be upfront about limits:** NFC tag IDs can be copied. For the demo that is fine. A real product would use something stronger. Say so if asked.
+**Be upfront about limits:** the latch is simulated (no servo at the event); the security chain up to the Arduino is real. Say so if asked.
 
 ---
 
@@ -699,7 +680,7 @@ When `fall_suspected` fires:
 1. Open a **local incident** and start the clock.
 2. Turn the buzzer on and show `TIME DOWN mm:ss`.
 3. Try to POST the event. If the backend is unreachable, keep going locally.
-4. Accept an **enrolled NFC tag** as an unlock while the local incident is open.
+4. Keep the door locked: no unlock path works offline (safe default).
 5. Log everything to a local file. Replay it to the backend when the network returns.
 
 ---
@@ -797,13 +778,13 @@ The challenge wants **at least two products beyond error monitoring** and a stor
 | 0:00 to 0:15 | "A lot of people who fall can't reach a phone or a pendant, and nobody wants a camera in the bathroom. FirstHour is a camera-free safety node." | Narrator | Hook |
 | 0:15 to 0:40 | Faller sits down onto the mat (beanbag drop beside it). Terminal shows both sensors spike. Display flips to `TIME DOWN`. Voice asks "Are you okay?" Faller: "Help, I slipped and can't move my leg." Triage continues. | Faller, Operator | M1, M2 |
 | 0:40 to 1:05 | Caregiver's phone buzzes with the triage card. Caregiver replies "I'm 2 minutes away." The box reads it aloud, calmly. | Caregiver | M3 |
-| 1:05 to 1:30 | A **stranger's phone** texts `UNLOCK` and nothing happens. Caregiver replies `UNLOCK 4821` and the latch clicks open. Say: "Only an enrolled number, with a one-time code, during a real incident, and every try is logged." | Narrator, Caregiver | M4 |
-| 1:30 to 1:50 | Unplug Wi-Fi. Faller falls again (a second drop). Buzzer and clock still run. Tap the enrolled NFC tag and the latch opens. Say: "Detection, alarm and unlock live on the QNX device, not in the cloud." | Operator, Narrator | M5 |
+| 1:05 to 1:30 | A **stranger's phone** texts `UNLOCK` and nothing happens. Caregiver replies `UNLOCK 4821` and the door opens on the Mac once the Pi confirms. Say: "Only an enrolled number, with a one-time code, during a real incident, and every try is logged." | Narrator, Caregiver | M4 |
+| 1:30 to 1:50 | Unplug Wi-Fi. Faller falls again (a second drop). Buzzer and clock still run. The door stays locked. Say: "Detection and alarm live on the QNX device, not in the cloud; the door never opens without a verified command." | Operator, Narrator | M5 |
 | 1:50 to 2:00 | Flash the Sentry trace. "This took N seconds end to end. Here is the slowest step." (Use the real number.) Close: "A prototype, built to be validated with clinicians and older adults." | Narrator | Close |
 
 **Before every run:**
 
-- [ ] `demo_reset.sh`: state `IDLE`, servo locked, display `READY`
+- [ ] `demo_reset.sh`: state `IDLE`, latch locked, display `READY`
 - [ ] Phone volume up, other notifications off
 - [ ] Speaker volume tested, mic tested in the room
 - [ ] Wi-Fi connected, backend, gateway and dashboard running
@@ -823,7 +804,6 @@ The challenge wants **at least two products beyond error monitoring** and a stor
 | StepFun slow or down | Rule-based triage | "AI summary is off; the rules still triage." |
 | ElevenLabs down | Pre-cached audio, or a stock voice | Keep it short |
 | Speech-to-text unreliable | Typed answer box (operator types) | Only if truly needed |
-| Servo jams | Green LED plus virtual door on the dashboard | "Latch prop is mechanical, here's the logic." |
 | QNX unstable | Edge on Linux | Do not claim QNX |
 | Venue Wi-Fi fails | Phone hotspot (set up and tested beforehand) | |
 | Everything fails | Play the backup video, walk the architecture | |
@@ -850,7 +830,7 @@ The challenge wants **at least two products beyond error monitoring** and a stor
 | --- | --- |
 | "Camera-free." | "99% accurate" or "zero false alarms" |
 | "Two sensors must agree before we check on the person." | "Detects every fall" |
-| "Detection, alarm and NFC unlock work offline." (if you tested it) | Any latency number you did not measure |
+| "Detection and alarm work offline." (if you tested it) | Any latency number you did not measure |
 | "Prototype built to be validated with clinicians and older adults." | "Clinically proven" or "saves lives" |
 | "Unlock needs an enrolled number, a one-time code and an open incident." | "Unhackable" |
 | "The voice is a synthetic assistant, used with consent." | Fall statistics without a source you can cite |
@@ -871,7 +851,7 @@ Check each box with a screenshot or log line you can show.
 
 | Sponsor | What their challenge asks for | Our proof |
 | --- | --- | --- |
-| **Main track: Beyond the Digital** | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, servo, NFC |
+| **Main track: Beyond the Digital** | Intelligence in the physical world with embedded AI or hardware | The QNX node, sensors, simulated latch |
 | **QNX** | (1) product uses **QNX OS**; (2) includes **one open-source AI module from oss.qnx.com** | [ ] QNX booting on the Pi [ ] named module running on the Pi |
 | **Photon** | A messaging or calling agent using **Photon 2.0 beta** | [ ] real text sent and received [ ] voice call if available |
 | **StepFun** | App must **call `step-5-preview` at runtime**; explain what each model does; judged on completing the task, reliability and user control | [ ] call visible in logs [ ] transcript and record visible in UI |
@@ -893,14 +873,12 @@ Read each sponsor's "View Additional Information" page for extra rules or forms.
 | Photon voice calls unavailable | Medium | Text only plus simulator |
 | Photon inbound reply lacks sender number | Medium | Simulator for the demo |
 | Thresholds fail in the demo room | Medium | Recalibrate on site, keep a "force fall" hotkey |
-| Servo stalls | Medium | Gap in the latch, separate power, LED fallback |
 | Speech recognition mishears | Medium | Short scripted answers, quiet corner, typed fallback |
 | Venue Wi-Fi isolation | Medium | Phone hotspot |
 | Team exhaustion | High | Sleep in shifts, freeze code at 8:30 AM |
 
 **What to cut, in this order, if time runs short:**
 
-1. Paramedic NFC handoff sheet
 2. Temperature or other extra sensors
 3. Voice cloning (use a stock voice)
 4. Session Replay
@@ -927,8 +905,6 @@ Read each sponsor's "View Additional Information" page for extra rules or forms.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Servo twitches or Arduino resets | USB can't supply enough current | Separate 5V supply, shared ground |
-| Servo hums but won't reach the angle | Mechanism binding | Loosen tape, adjust the stick, change the angles |
 | No serial data on the Pi | Wrong port or baud rate | List ports, confirm 115200 |
 | Pi can't reach backend | Different Wi-Fi or firewall | Use the laptop's LAN IP, or a phone hotspot |
 | Pi rejects every command | Clock drift or secret mismatch | Sync clocks, check `SHARED_SECRET` |
