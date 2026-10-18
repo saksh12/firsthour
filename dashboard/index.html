@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FirstHour Dashboard</title>
+<link rel="icon" href="data:,">
 <!--
   Live incident view (IMPLEMENTATION.md sections 6.7, 7 Phase 1 step 8).
   Plain HTML, no build step. Reads everything from the backend's /ws/dashboard.
@@ -113,6 +114,22 @@ button:disabled { opacity: .5; cursor: default; }
 .op-msg.err { color: var(--alert); }
 .full { grid-column: 1 / -1; }
 
+.speech { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+button.mic { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 16px; font-size: 18px; border-radius: 14px;
+  touch-action: none; user-select: none; -webkit-user-select: none; transition: background .15s, color .15s; }
+button.mic svg { width: 24px; height: 24px; flex: none; }
+button.mic small { font-weight: 500; opacity: .75; font-size: 13px; }
+button.mic.on { background: var(--alert); color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .78; } }
+.mic-status { font-size: 15px; min-height: 22px; overflow-wrap: anywhere; }
+.mic-status.interim { font-style: italic; }
+.mic-status.err { color: var(--alert); }
+.speech-opts { display: flex; gap: 6px 16px; flex-wrap: wrap; align-items: center; font-size: 14px; color: var(--dim); }
+.speech-opts label { display: inline-flex; align-items: center; gap: 6px; }
+.speech-opts input { flex: none; }
+.speech-opts input[type="number"] { width: 64px; padding: 4px 8px; }
+.privacy { margin: 0; font-size: 12px; color: var(--dim); }
+
 @media (max-width: 820px) {
   .wrap { padding: 16px 16px 40px; }
   .hero, .grid { grid-template-columns: 1fr; }
@@ -171,9 +188,21 @@ button:disabled { opacity: .5; cursor: default; }
 
     <div class="panel">
       <p class="label">Operator</p>
+      <div class="speech" id="speech">
+        <button type="button" class="mic" id="mic" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span id="mic-label">Hold to talk</span><small id="mic-hint">or hold Space</small>
+        </button>
+        <div class="mic-status" id="mic-status" aria-live="polite"></div>
+        <div class="speech-opts">
+          <label><input type="checkbox" id="auto-listen"> Auto-listen</label>
+          <label>after <input type="number" id="auto-delay" value="3" min="0" max="15" step="0.5" aria-label="Auto-listen delay in seconds"> s</label>
+        </div>
+        <p class="privacy">Chrome's speech recognition sends audio to Google's service; nothing is recorded or stored by FirstHour.</p>
+      </div>
       <form class="answer" id="answer-form" autocomplete="off">
         <label for="answer" class="label" style="position:absolute;left:-9999px">Typed answer</label>
-        <input id="answer" placeholder="Type what she said (speech fallback)">
+        <input id="answer" placeholder="Or type what she said">
         <button type="submit">Send</button>
       </form>
       <div class="op-row">
@@ -407,6 +436,7 @@ button:disabled { opacity: .5; cursor: default; }
         break;
     }
     render();
+    speech.onView();
   }
 
   // --- WebSocket with reconnect ------------------------------------------------
@@ -436,9 +466,10 @@ button:disabled { opacity: .5; cursor: default; }
 
   // --- operator actions ------------------------------------------------------
 
-  async function post(path, body) {
+  async function post(path, body, what) {
     const msg = $("op-msg");
-    msg.className = "op-msg"; msg.textContent = "Sending…";
+    const pre = what ? what + " · " : "";
+    msg.className = "op-msg"; msg.textContent = pre + "Sending…";
     try {
       const r = await fetch(backend + path, {
         method: "POST",
@@ -446,11 +477,11 @@ button:disabled { opacity: .5; cursor: default; }
         body: body ? JSON.stringify(body) : undefined,
       });
       if (!r.ok) throw new Error("backend said " + r.status);
-      msg.textContent = "Sent.";
+      msg.textContent = pre + "Sent.";
       return true;
     } catch (e) {
       msg.className = "op-msg err";
-      msg.textContent = "Couldn't reach the backend (" + e.message + "). If the page is on another origin, the backend needs CORS enabled.";
+      msg.textContent = pre + "Couldn't reach the backend (" + e.message + "). If the page is on another origin, the backend needs CORS enabled.";
       return false;
     }
   }
@@ -465,6 +496,163 @@ button:disabled { opacity: .5; cursor: default; }
   });
   $("resolve").addEventListener("click", () => post("/incident/resolve"));
   $("backend-url").textContent = backend;
+
+  // --- speech input (Web Speech API, IMPLEMENTATION.md 7 Phase 1 step 6) ------
+  // Push-to-talk by default; Auto-listen is opt-in. A final transcript goes to
+  // /person/answer exactly like the typed box. Silence posts nothing: the backend's
+  // own silence timer escalates. Audio goes to the browser's recognizer only.
+
+  const speech = (() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const HOLD_MS = 400;          // shorter press = tap: listen for one answer
+    const SILENCE_MS = 8000;      // tap / auto: give up after this long with no speech
+    const mic = $("mic"), status = $("mic-status"), auto = $("auto-listen"), delay = $("auto-delay");
+    let rec = null, mode = null, finals = "", pressAt = 0, pressing = false, error = "";
+    let silenceTimer = null, autoTimer = null, lastAsking = null;
+
+    function show(text, cls) { status.className = "mic-status" + (cls ? " " + cls : ""); status.textContent = text; }
+
+    function setUi(on) {
+      mic.classList.toggle("on", on);
+      mic.setAttribute("aria-pressed", String(on));
+      $("mic-label").textContent = on ? "Listening…" : "Hold to talk";
+      $("mic-hint").textContent = on ? (mode === "hold" ? "release to send" : "tap to stop") : "or hold Space";
+    }
+
+    function armSilence() {
+      clearTimeout(silenceTimer);
+      if (rec && mode !== "hold") silenceTimer = setTimeout(() => { if (rec) rec.stop(); }, SILENCE_MS);
+    }
+
+    function start(m) {
+      if (!SR || rec) return;
+      mode = m; finals = ""; error = "";
+      const r = new SR();
+      r.lang = "en-US";
+      r.continuous = true;        // the press decides when to stop; tap/auto stop on the first final
+      r.interimResults = true;
+      r.maxAlternatives = 1;
+      r.onstart = () => { if (rec === r) armSilence(); };
+      r.onspeechstart = () => { if (rec === r) armSilence(); };
+      r.onresult = (e) => {
+        if (rec !== r) return;
+        let interim = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const t = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finals += (finals ? " " : "") + t.trim();
+          else interim += t;
+        }
+        show(((finals ? finals + " " : "") + interim).trim() || "Listening…", "interim");
+        armSilence();
+        if (finals.trim() && mode !== "hold") r.stop();
+      };
+      r.onerror = (e) => { if (rec === r) error = e.error || "unknown"; };
+      r.onend = () => {
+        if (rec !== r) return;
+        rec = null; clearTimeout(silenceTimer); setUi(false);
+        const text = finals.trim();
+        if (text) { show(""); sendAnswer(text); return; }
+        const why = {
+          "not-allowed": "Microphone blocked. Allow the mic for this page, or type the answer.",
+          "service-not-allowed": "Speech service not allowed in this browser. Type the answer.",
+          "audio-capture": "No microphone found. Type the answer.",
+          "network": "Speech service unreachable (needs internet). Type the answer.",
+          "no-speech": "Didn't hear anything. Nothing sent.",
+          "language-not-supported": "Speech language not supported. Type the answer.",
+        };
+        if (error === "aborted") show("");
+        else if (error) show(why[error] || "Speech error (" + error + "). Type the answer.", error === "no-speech" ? "" : "err");
+        else show("Didn't hear an answer. Nothing sent.");
+      };
+      rec = r;
+      setUi(true);
+      show(m === "auto" ? "Listening for her answer…" : "Listening…", "interim");
+      try { r.start(); }
+      catch (e) { rec = null; setUi(false); show("Couldn't start the mic (" + e.message + "). Type the answer.", "err"); }
+    }
+
+    function stop() { if (rec) rec.stop(); }
+    function abort() { if (rec) rec.abort(); }
+
+    async function sendAnswer(text) {
+      if (!text.trim()) return;  // never post empty: silence must stay silence
+      const ok = await post("/person/answer", { text }, "Heard “" + text + "”");
+      const input = $("answer");
+      if (!ok && !input.value) input.value = text;  // keep it for the typed box
+    }
+
+    function pressStart() {
+      if (pressing) return;
+      pressing = true; pressAt = Date.now();
+      clearTimeout(autoTimer);
+      if (rec) {
+        if (mode === "hold") return;
+        mode = "stop-on-release";
+        return;
+      }
+      start("hold");
+    }
+
+    function pressEnd() {
+      if (!pressing) return;
+      pressing = false;
+      if (!rec) return;
+      if (mode === "stop-on-release") { stop(); return; }
+      if (Date.now() - pressAt >= HOLD_MS) { stop(); return; }
+      mode = "tap"; setUi(true); armSilence();
+      if (finals.trim()) rec.stop();
+    }
+
+    function isTextField(el) {
+      return el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+    }
+
+    // Called after every dashboard event: listen once when the asked question changes.
+    function onView() {
+      if (view.state === "IDLE") {
+        clearTimeout(autoTimer); lastAsking = null;
+        if (rec && mode === "auto") abort();
+        return;
+      }
+      if (view.asking === lastAsking) return;
+      lastAsking = view.asking;
+      if (!view.asking && rec && mode === "auto") abort();  // script finished: stop waiting
+      clearTimeout(autoTimer);
+      if (!SR || !auto.checked || !view.asking) return;
+      const asked = view.asking;
+      const ms = Math.max(0, Math.min(15, parseFloat(delay.value) || 0)) * 1000;
+      autoTimer = setTimeout(() => {
+        if (auto.checked && view.state !== "IDLE" && view.asking === asked && !rec) start("auto");
+      }, ms);
+    }
+
+    if (!SR) {
+      mic.disabled = true; auto.disabled = true; delay.disabled = true;
+      show("Speech input needs Chrome. Use the typed box below.", "err");
+    } else {
+      mic.addEventListener("pointerdown", (e) => { if (e.button === 0) { e.preventDefault(); pressStart(); } });
+      mic.addEventListener("pointerup", pressEnd);
+      mic.addEventListener("pointercancel", pressEnd);
+      mic.addEventListener("pointerleave", () => { if (pressing && mode === "hold") pressEnd(); });
+      mic.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.repeat) { e.preventDefault(); pressStart(); pressEnd(); } });
+      document.addEventListener("keydown", (e) => {
+        if (e.code !== "Space" || isTextField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        if (!e.repeat) pressStart();
+      });
+      document.addEventListener("keyup", (e) => {
+        if (e.code !== "Space" || isTextField(e.target)) return;
+        e.preventDefault();
+        pressEnd();
+      });
+      window.addEventListener("blur", () => { if (pressing) pressEnd(); });
+      auto.addEventListener("change", () => {
+        if (!auto.checked) { clearTimeout(autoTimer); if (rec && mode === "auto") abort(); }
+      });
+    }
+
+    return { onView };
+  })();
 
   render();
   setInterval(() => { renderClock(); renderDoor(); }, 250);
