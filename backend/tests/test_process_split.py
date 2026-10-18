@@ -4,6 +4,7 @@ while the uplink process hangs, dies or restarts, and the uplink signs nothing i
 import hashlib
 import hmac
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -16,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from edge import supervisor
+from edge import sensor_node, supervisor
 from edge.link import LineConn, UplinkServer
 from edge.security import CommandVerifier, sign_audio, sign_event, sign_poll
 from edge.sensor_node import Node
@@ -304,3 +305,41 @@ def test_supervisor_children_and_priorities(monkeypatch, tmp_path):
     assert safety.cmd[:3] == ["on", "-p", "21"] and "--uplink-socket" in safety.cmd
     assert safety.restart_cmd == safety.cmd + ["--resume"]
     assert uplink.cmd[:3] == ["on", "-p", "10"] and "http://mac:8002" in uplink.cmd
+
+
+def test_usb_worker_exits_cleanly_when_its_reader_dies_so_the_restart_can_claim_the_hub(monkeypatch, tmp_path):
+    class FakeUsb:
+        def reconnect(self):
+            return False
+
+        def readline(self, timeout):
+            return "S,1,2,0,0,1,50"
+
+        def write(self, cmd):
+            pass
+
+    class DeadPipe:
+        def __init__(self, fd):
+            self.fd = fd
+
+        def write(self, s):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            pass
+
+        def fileno(self):
+            return self.fd
+
+    r, w = os.pipe()
+    out = os.open(tmp_path / "stdout", os.O_WRONLY | os.O_CREAT)
+    stdin = os.fdopen(r)
+    monkeypatch.setattr(sensor_node, "UsbCdcSource", FakeUsb)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", DeadPipe(out))
+    try:
+        assert sensor_node._usb_worker() == 0
+    finally:
+        stdin.close()
+        os.close(w)
+        os.close(out)

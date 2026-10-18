@@ -918,23 +918,30 @@ def _usb_worker() -> int:
             raise
         log.warning("BOX-3 is not ready: %s", error)
         return 75
-    print("I,box3 usb=connected", flush=True)
     pending = b""
-    while True:
-        if source.reconnect():
-            print("I,box3 usb=reconnected", flush=True)
-        ready, _, _ = select.select([sys.stdin], [], [], 0)
-        if ready:
-            data = os.read(sys.stdin.fileno(), 4096)
-            if not data:
-                return 0
-            pending += data
-            while b"\n" in pending:
-                cmd, pending = pending.split(b"\n", 1)
-                source.write(cmd.decode())
-        line = source.readline(0.05)
-        if line:
-            print(line, flush=True)
+    try:
+        print("I,box3 usb=connected", flush=True)
+        while True:
+            if source.reconnect():
+                print("I,box3 usb=reconnected", flush=True)
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                data = os.read(sys.stdin.fileno(), 4096)
+                if not data:
+                    return 0
+                pending += data
+                while b"\n" in pending:
+                    cmd, pending = pending.split(b"\n", 1)
+                    source.write(cmd.decode())
+            line = source.readline(0.05)
+            if line:
+                print(line, flush=True)
+    except BrokenPipeError:
+        # The reader died (a supervisor restart is routine): exit so its replacement can claim the hub.
+        # Pointing stdout at /dev/null stops the interpreter's exit flush from raising again.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        log.info("USB worker: reader gone, releasing the hub")
+        return 0
 
 
 def main():
