@@ -36,11 +36,11 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 
 - [x] (A · Codex) BOX-3 Mac USB bring-up: flashed, clap/tilt readings observed, BOOT emits `B`, `U`/`L`/`A1`/`A0` acknowledge
 - [x] (A · Codex) BOX-3 QNX bring-up: 127 sensor samples; `L`/`A1`/`A0`/`U`/`L` acknowledged through raw USB; 332 tests pass
-- [ ] (A) Simulated latch: `U` lights the latch LED, `ACK,U`, relocks after the hold time (no servo)
+- [x] (A · Codex) Simulated latch: `ACK,U`, BOX-3 screen shows `LATCH OPEN`, then automatically `LATCH LOCKED` after the hold (no servo or latch LED)
 - [x] (A · Codex) BOX-3 microphone readings noted on Mac USB; clap/tilt capture peaked at 16013 (not calibrated)
 - [x] (A · Codex) BOX-3 accelerometer readings noted on Mac USB; near 1 g at rest, all axes change on tilt
 - [ ] (A) Ultrasonic readings noted
-- [ ] (A) Buzzer + display by command
+- [x] (A · Codex) BOX-3 display + audible alarm by command; operator verified timer text, beep start/stop, latch status, and automatic relock (`edge/box3-display-alarm`)
 - [x] (A · Codex) QNX: SSH shell + BOX-3 sensor samples through pyusb/libusb (no USB-serial driver)
 - [x] (A) `sensor_node.py` fusion, tested with `sim_sensors.py`
 
@@ -55,7 +55,7 @@ Claim a task by putting your role (and name) on the line, e.g. `- [ ] (B · Sam)
 - [ ] (C) `STUB_ELEVENLABS=0`, phrases cached, consented voice or stock
 - [ ] (C) Photon gateway: text out, reply in (90-minute cap, then simulator)
 - [ ] (D) Sentry tracing spans + uptime monitor on tunneled `/health`
-- [ ] (A) Local alarm + `TIME DOWN` with backend unreachable
+- [x] (A · Codex) Local BOX-3 alarm + `TIME DOWN` with test backend paused; operator confirmed alarm, ticking clock, and locked latch; incident replayed on reconnect
 
 ## Phase 4: Hardening (10:30 PM to 1:30 AM)
 
